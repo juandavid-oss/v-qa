@@ -38,6 +38,17 @@ export default function VideoPreview({
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
+    if (!Number.isFinite(currentTime) || currentTime < 0) return;
+
+    // Apply explicit seeks coming from timeline interactions.
+    if (Math.abs(video.currentTime - currentTime) > 0.35) {
+      video.currentTime = currentTime;
+    }
+  }, [currentTime]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
 
     const handleTimeUpdate = () => {
       onTimeUpdate(video.currentTime);

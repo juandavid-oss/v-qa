@@ -5,24 +5,29 @@ import type { TextDetection } from "@/types/database";
 interface SubtitlesPanelProps {
   subtitles: TextDetection[];
   currentTime: number;
+  showOnScreenFallback?: boolean;
 }
 
-export default function SubtitlesPanel({ subtitles, currentTime }: SubtitlesPanelProps) {
+export default function SubtitlesPanel({
+  subtitles,
+  currentTime,
+  showOnScreenFallback = false,
+}: SubtitlesPanelProps) {
   return (
     <div className="h-full flex flex-col">
       <div className="flex items-center justify-between mb-4">
         <h2 className="font-display font-bold text-lg flex items-center gap-2">
           <span className="material-symbols-outlined text-primary">subtitles</span>
-          Subtitles
+          {showOnScreenFallback ? "On-screen Text" : "Subtitles"}
         </h2>
         <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">
-          Synced
+          {showOnScreenFallback ? "OCR" : "Synced"}
         </span>
       </div>
       <div className="flex-1 bg-surface-light dark:bg-surface-dark rounded-2xl border border-slate-200 dark:border-slate-800 p-6 overflow-y-auto relative">
         <div className="space-y-8 py-20">
           {subtitles.length === 0 ? (
-            <p className="text-center text-slate-500 text-sm">No subtitles detected yet</p>
+            <p className="text-center text-slate-500 text-sm">No on-screen text detected yet</p>
           ) : (
             subtitles.map((sub) => {
               const isActive =

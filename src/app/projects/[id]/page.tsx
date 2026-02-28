@@ -51,7 +51,7 @@ export default function ProjectDetailPage() {
       setProject(p);
       setStatus(p.status);
       setProgress(p.progress);
-      setAnalysisError(p.error_message);
+      setAnalysisError(p.status === "error" ? p.error_message : null);
     }
 
     // Fetch text detections
@@ -59,11 +59,10 @@ export default function ProjectDetailPage() {
       .from("text_detections")
       .select("*")
       .eq("project_id", projectId)
-      .eq("is_partial_sequence", false)
       .order("start_time");
 
     if (detections) {
-      const all = detections as TextDetection[];
+      const all = (detections as TextDetection[]).filter((d) => d.is_partial_sequence !== true);
       setTotalDetections(all.length);
       setSubtitles(all.filter((d) => d.is_subtitle));
       setFixedTexts(all.filter((d) => d.is_fixed_text));
@@ -221,6 +220,8 @@ export default function ProjectDetailPage() {
 
   const duration = project.duration_seconds || 0;
   const isProcessing = !["pending", "completed", "error"].includes(status);
+  const panelDetections = subtitles.length > 0 ? subtitles : fixedTexts;
+  const showingOnScreenFallback = subtitles.length === 0 && fixedTexts.length > 0;
 
   return (
     <div className="flex flex-col min-h-screen relative">
@@ -244,7 +245,11 @@ export default function ProjectDetailPage() {
         <div className="grid grid-cols-12 gap-6 mb-6">
           {/* Subtitles - Left */}
           <div className="col-span-12 lg:col-span-3 h-[600px]">
-            <SubtitlesPanel subtitles={subtitles} currentTime={currentTime} />
+            <SubtitlesPanel
+              subtitles={panelDetections}
+              currentTime={currentTime}
+              showOnScreenFallback={showingOnScreenFallback}
+            />
           </div>
 
           {/* Video Preview - Center */}

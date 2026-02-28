@@ -102,7 +102,7 @@ export async function POST(request: Request) {
     // Update project status to indicate processing started
     await supabase
       .from("projects")
-      .update({ status: "fetching_video", progress: 5 })
+      .update({ status: "fetching_video", progress: 5, error_message: null })
       .eq("id", project_id);
 
     return NextResponse.json({ status: "processing" });
