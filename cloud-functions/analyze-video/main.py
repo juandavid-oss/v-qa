@@ -51,6 +51,8 @@ def _ensure_ffmpeg():
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL")
+GEMINI_FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-1.5-flash")
 LANGUAGETOOL_URL = os.environ.get("LANGUAGETOOL_URL", "https://api.languagetool.org/v2/check")
 CLOUD_FUNCTION_SECRET = os.environ.get("CLOUD_FUNCTION_SECRET")
 FRAME_IO_TOKEN = os.environ.get("FRAME_IO_TOKEN") or os.environ.get("FRAME_IO_V4_TOKEN")
@@ -668,9 +670,10 @@ def extract_audio(video_path: str, tmp_dir: str) -> str:
 
 def transcribe_with_gemini(audio_path: str) -> list[dict]:
     """Transcribe audio using Gemini."""
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    if not GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY is not configured")
 
+    genai.configure(api_key=GEMINI_API_KEY)
     audio_file = genai.upload_file(audio_path, mime_type="audio/wav")
 
     prompt = """Transcribe this audio precisely. Return the transcription as a JSON array where each element has:
@@ -681,17 +684,65 @@ def transcribe_with_gemini(audio_path: str) -> list[dict]:
 
 Return ONLY valid JSON, no markdown or other text."""
 
-    response = model.generate_content([prompt, audio_file])
-    text = response.text.strip()
+    candidate_models: list[str] = []
+    configured_model = read_string(GEMINI_MODEL)
+    if configured_model:
+        candidate_models.append(configured_model)
+    for fallback_model in GEMINI_FALLBACK_MODELS:
+        if fallback_model not in candidate_models:
+            candidate_models.append(fallback_model)
 
-    # Clean potential markdown wrapping
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1]
-        text = text.rsplit("```", 1)[0]
+    last_error = None
+    try:
+        for model_name in candidate_models:
+            try:
+                print(f"Transcribing with Gemini model: {model_name}", flush=True)
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content([prompt, audio_file])
+                text = (response.text or "").strip()
+                if not text:
+                    raise RuntimeError("Gemini returned an empty transcription response")
 
-    import json
-    segments = json.loads(text)
-    return segments
+                # Clean potential markdown wrapping
+                if text.startswith("```"):
+                    text = text.split("\n", 1)[1]
+                    text = text.rsplit("```", 1)[0]
+
+                import json
+                segments = json.loads(text)
+                if not isinstance(segments, list):
+                    raise RuntimeError("Gemini transcription response was not a JSON array")
+                return segments
+            except Exception as error:
+                last_error = error
+                message = str(error)
+                print(f"Gemini model {model_name} failed: {message}", flush=True)
+                if not is_gemini_model_unavailable_error(message):
+                    raise
+    finally:
+        try:
+            if getattr(audio_file, "name", None):
+                genai.delete_file(audio_file.name)
+        except Exception:
+            pass
+
+    raise RuntimeError(
+        "No available Gemini model for transcription. "
+        f"Tried: {', '.join(candidate_models)}. Last error: {last_error}"
+    )
+
+
+def is_gemini_model_unavailable_error(message: str) -> bool:
+    lowered = message.lower()
+    if "no longer available to new users" in lowered:
+        return True
+    if "model not found" in lowered:
+        return True
+    if "not found for api version" in lowered and "models/" in lowered:
+        return True
+    if "404" in lowered and "models/" in lowered:
+        return True
+    return False
 
 
 # --- 6. Spelling & Grammar Check (LanguageTool) ---

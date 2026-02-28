@@ -48,7 +48,7 @@ export default function VideoPreview({
   }, [onTimeUpdate]);
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
           <h2 className="font-display font-bold text-lg text-slate-100">Live Preview</h2>
@@ -56,7 +56,7 @@ export default function VideoPreview({
         </div>
         <div className="flex gap-2">
           <span className="px-2 py-1 rounded-md bg-slate-100 dark:bg-slate-800 text-[10px] font-mono text-slate-500">
-            1080P / 60FPS
+            Fixed 720p Viewport
           </span>
           <span className="px-2 py-1 rounded-md bg-slate-100 dark:bg-slate-800 text-[10px] font-mono text-slate-500 uppercase">
             {formatTimecode(currentTime)}
@@ -64,19 +64,20 @@ export default function VideoPreview({
         </div>
       </div>
 
-      <div className="flex-1 bg-black rounded-2xl overflow-hidden relative shadow-2xl group border border-slate-200 dark:border-slate-800 flex flex-col">
-        <div className="relative flex-1 bg-black">
+      <div className="mx-auto w-full max-w-[760px]">
+        <div className="bg-black rounded-t-2xl overflow-hidden relative shadow-2xl group border border-slate-200 dark:border-slate-800 border-b-0">
+          <div className="relative bg-black h-[220px] sm:h-[280px] md:h-[360px] lg:h-[405px]">
           {videoUrl ? (
             <video
               ref={videoRef}
-              className="w-full h-full object-contain"
+              className="w-full h-full object-contain bg-black"
               src={videoUrl}
               poster={thumbnailUrl || undefined}
             />
           ) : thumbnailUrl ? (
             <img
               alt="Video frame preview"
-              className="w-full h-full object-cover opacity-80"
+              className="w-full h-full object-cover opacity-80 bg-black"
               src={thumbnailUrl}
             />
           ) : (
@@ -98,7 +99,7 @@ export default function VideoPreview({
       </div>
 
       {/* Controls */}
-      <div className="bg-surface-dark border-x border-b border-slate-800 rounded-b-2xl p-4 -mt-4">
+      <div className="bg-surface-dark border border-slate-800 rounded-b-2xl p-4">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
             <button onClick={onPlayPause} className="cursor-pointer">
@@ -125,6 +126,7 @@ export default function VideoPreview({
             </span>
           </div>
         </div>
+      </div>
       </div>
     </div>
   );
