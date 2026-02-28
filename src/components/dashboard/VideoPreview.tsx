@@ -67,33 +67,34 @@ export default function VideoPreview({
       <div className="mx-auto w-full max-w-[760px]">
         <div className="bg-black rounded-t-2xl overflow-hidden relative shadow-2xl group border border-slate-200 dark:border-slate-800 border-b-0">
           <div className="relative bg-black h-[220px] sm:h-[280px] md:h-[360px] lg:h-[405px]">
-          {videoUrl ? (
-            <video
-              ref={videoRef}
-              className="w-full h-full object-contain bg-black"
-              src={videoUrl}
-              poster={thumbnailUrl || undefined}
-            />
-          ) : thumbnailUrl ? (
-            <img
-              alt="Video frame preview"
-              className="w-full h-full object-cover opacity-80 bg-black"
-              src={thumbnailUrl}
-            />
-          ) : (
-            <div className="w-full h-full flex items-center justify-center">
-              <span className="material-symbols-outlined text-slate-700 text-6xl">movie</span>
+            {videoUrl ? (
+              <video
+                ref={videoRef}
+                className="w-full h-full object-contain bg-black"
+                src={videoUrl}
+                poster={thumbnailUrl || undefined}
+              />
+            ) : thumbnailUrl ? (
+              <img
+                alt="Video frame preview"
+                className="w-full h-full object-cover opacity-80 bg-black"
+                src={thumbnailUrl}
+              />
+            ) : (
+              <div className="w-full h-full flex items-center justify-center">
+                <span className="material-symbols-outlined text-slate-700 text-6xl">movie</span>
+              </div>
+            )}
+            <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/20">
+              <button
+                onClick={onPlayPause}
+                className="w-16 h-16 bg-primary/90 text-white rounded-full flex items-center justify-center shadow-xl transform scale-90 group-hover:scale-100 transition-transform cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-4xl">
+                  {playing ? "pause" : "play_arrow"}
+                </span>
+              </button>
             </div>
-          )}
-          <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/20">
-            <button
-              onClick={onPlayPause}
-              className="w-16 h-16 bg-primary/90 text-white rounded-full flex items-center justify-center shadow-xl transform scale-90 group-hover:scale-100 transition-transform cursor-pointer"
-            >
-              <span className="material-symbols-outlined text-4xl">
-                {playing ? "pause" : "play_arrow"}
-              </span>
-            </button>
           </div>
         </div>
       </div>
@@ -126,7 +127,6 @@ export default function VideoPreview({
             </span>
           </div>
         </div>
-      </div>
       </div>
     </div>
   );
