@@ -273,7 +273,7 @@ def media_link_to_url(value) -> str | None:
     if isinstance(value, str) and value:
         return value
     if isinstance(value, dict):
-        for key in ("href", "download", "url"):
+        for key in ("href", "download", "download_url", "secure_download_url", "url", "src", "source_url"):
             candidate = value.get(key)
             if isinstance(candidate, str) and candidate:
                 return candidate

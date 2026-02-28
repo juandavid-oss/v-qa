@@ -307,14 +307,18 @@ function mediaLinkToUrl(value: unknown): string | null {
   if (typeof value === "string" && value.trim()) return value;
   if (!isRecord(value)) return null;
 
-  const href = readString(value["href"]);
-  if (href) return href;
-
-  const download = readString(value["download"]);
-  if (download) return download;
-
-  const url = readString(value["url"]);
-  if (url) return url;
+  const candidates = [
+    readString(value["href"]),
+    readString(value["download"]),
+    readString(value["download_url"]),
+    readString(value["secure_download_url"]),
+    readString(value["url"]),
+    readString(value["src"]),
+    readString(value["source_url"]),
+  ];
+  for (const candidate of candidates) {
+    if (candidate) return candidate;
+  }
 
   return null;
 }
