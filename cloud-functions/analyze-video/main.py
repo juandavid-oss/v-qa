@@ -96,6 +96,27 @@ def parse_frame_io_asset_id(frame_io_url: str) -> str | None:
     return None
 
 
+def is_frame_view_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+
+    host = (parsed.hostname or "").lower()
+    is_frame_host = host == "frame.io" or host.endswith(".frame.io") or host == "f.io"
+    if not is_frame_host:
+        return False
+
+    path_parts = [p.lower() for p in parsed.path.split("/") if p]
+    if len(path_parts) >= 2 and path_parts[0] in {"player", "f"}:
+        return True
+    if len(path_parts) >= 3 and path_parts[0] in {"review", "reviews"}:
+        return True
+    if len(path_parts) >= 4 and path_parts[0] in {"project", "projects"} and path_parts[2] == "view":
+        return True
+    return False
+
+
 def fetch_video_from_frame_io(frame_io_url: str) -> dict:
     if not FRAME_IO_TOKEN:
         raise ValueError("FRAME_IO_TOKEN is not configured")
@@ -175,16 +196,19 @@ def extract_frame_metadata(file_data: dict) -> dict:
     if not isinstance(media_links, dict):
         media_links = {}
 
-    video_url = (
-        media_link_to_url(media_links.get("high_quality"))
-        or media_link_to_url(media_links.get("original"))
-        or media_link_to_url(media_links.get("efficient"))
-        or read_string(file_data.get("view_url"))
-    )
+    video_url = pick_video_link(media_links) or pick_top_level_video_link(file_data)
 
     thumbnail_url = media_link_to_url(media_links.get("thumbnail")) or find_thumbnail_link(media_links)
     if not thumbnail_url:
         thumbnail_url = read_string(file_data.get("thumbnail_url"))
+
+    if not video_url:
+        view_url = read_string(file_data.get("view_url"))
+        print(
+            "Frame.io metadata resolved without direct video URL "
+            f"(media_link_keys={list(media_links.keys())}, has_view_url={bool(view_url)})",
+            flush=True,
+        )
 
     return {
         "name": read_string(file_data.get("name")),
@@ -215,6 +239,33 @@ def find_thumbnail_link(media_links: dict) -> str | None:
             found = media_link_to_url(value)
             if found:
                 return found
+    return None
+
+
+def pick_video_link(media_links: dict) -> str | None:
+    preferred_keys = ("high_quality", "original", "efficient")
+    for key in preferred_keys:
+        candidate = media_link_to_url(media_links.get(key))
+        if candidate and not is_frame_view_url(candidate):
+            return candidate
+
+    for key, value in media_links.items():
+        lower = key.lower()
+        if "thumb" in lower or "thumbnail" in lower or "poster" in lower:
+            continue
+
+        candidate = media_link_to_url(value)
+        if candidate and not is_frame_view_url(candidate):
+            return candidate
+
+    return None
+
+
+def pick_top_level_video_link(file_data: dict) -> str | None:
+    for key in ("download_url", "source_url", "asset_url", "original_url"):
+        candidate = read_string(file_data.get(key))
+        if candidate and not is_frame_view_url(candidate):
+            return candidate
     return None
 
 
@@ -321,11 +372,16 @@ def download_video(video_url: str, tmp_dir: str) -> str:
             total += len(chunk)
     size_mb = total / (1024 * 1024)
     print(f"Downloaded {size_mb:.1f} MB to {video_path}", flush=True)
-    if total < 1000:
-        # Likely an error page, not a video
-        with open(video_path, "r", errors="replace") as f:
-            preview = f.read(500)
-        print(f"WARNING: File too small, content preview: {preview}", flush=True)
+    if "text/html" in content_type.lower() or total < 1000:
+        with open(video_path, "rb") as f:
+            raw_preview = f.read(500)
+        preview = raw_preview.decode("utf-8", errors="replace")
+        raise ValueError(
+            "Video download did not return a valid media file "
+            f"(content_type={content_type}, bytes={total}). "
+            "The URL is likely a Frame.io page link or an expired temporary URL. "
+            f"Preview: {preview}"
+        )
     return video_path
 
 

@@ -1,4 +1,5 @@
 const FRAME_IO_V4_API = "https://api.frame.io/v4";
+const FRAME_WEB_HOSTS = new Set(["frame.io", "www.frame.io", "app.frame.io", "next.frame.io", "f.io"]);
 
 type JsonRecord = Record<string, unknown>;
 
@@ -80,6 +81,43 @@ export function parseFrameIoUrl(url: string): string | null {
   }
 
   return null;
+}
+
+export function isFrameIoViewUrl(url: string): boolean {
+  const parsed = tryParseUrl(url);
+  if (!parsed) return false;
+
+  const host = parsed.hostname.toLowerCase();
+  if (!FRAME_WEB_HOSTS.has(host) && !host.endsWith(".frame.io")) {
+    return false;
+  }
+
+  const pathnameParts = parsed.pathname.split("/").filter(Boolean).map((part) => part.toLowerCase());
+
+  if (pathnameParts[0] === "player" && pathnameParts[1]) {
+    return true;
+  }
+
+  if (
+    (pathnameParts[0] === "review" || pathnameParts[0] === "reviews") &&
+    pathnameParts[2]
+  ) {
+    return true;
+  }
+
+  if (pathnameParts[0] === "f" && pathnameParts[1]) {
+    return true;
+  }
+
+  if (
+    (pathnameParts[0] === "project" || pathnameParts[0] === "projects") &&
+    pathnameParts[2] === "view" &&
+    pathnameParts[3]
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 export async function resolveFrameIoMetadata(assetId: string, token: string): Promise<FrameIoMetadata> {
@@ -170,14 +208,17 @@ function extractMetadataFromFileLike(fileLike: JsonRecord): {
   video_url: string | null;
 } {
   const mediaLinks = isRecord(fileLike["media_links"]) ? fileLike["media_links"] : null;
-  const videoUrl =
-    pickMediaLink(mediaLinks, "high_quality") ||
-    pickMediaLink(mediaLinks, "original") ||
-    pickMediaLink(mediaLinks, "efficient") ||
-    readString(fileLike["view_url"]) ||
-    null;
+  const videoUrl = pickVideoLink(mediaLinks) || pickTopLevelVideoLink(fileLike);
 
   const thumbnailUrl = pickThumbnailLink(mediaLinks) || readString(fileLike["thumbnail_url"]) || null;
+
+  if (!videoUrl) {
+    const legacyViewUrl = readString(fileLike["view_url"]);
+    console.warn("Frame.io metadata resolved without direct video URL", {
+      media_link_keys: mediaLinks ? Object.keys(mediaLinks) : [],
+      has_view_url: Boolean(legacyViewUrl),
+    });
+  }
 
   return {
     name: readString(fileLike["name"]) || null,
@@ -217,6 +258,43 @@ function pickThumbnailLink(mediaLinks: JsonRecord | null): string | null {
     }
   }
 
+  return null;
+}
+
+function pickVideoLink(mediaLinks: JsonRecord | null): string | null {
+  const preferredKeys = ["high_quality", "original", "efficient"];
+  for (const key of preferredKeys) {
+    const candidate = pickMediaLink(mediaLinks, key);
+    if (candidate && !isFrameIoViewUrl(candidate)) {
+      return candidate;
+    }
+  }
+
+  if (!mediaLinks) return null;
+
+  for (const [key, value] of Object.entries(mediaLinks)) {
+    const lower = key.toLowerCase();
+    if (lower.includes("thumbnail") || lower.includes("thumb") || lower.includes("poster")) {
+      continue;
+    }
+
+    const candidate = mediaLinkToUrl(value);
+    if (candidate && !isFrameIoViewUrl(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function pickTopLevelVideoLink(fileLike: JsonRecord): string | null {
+  const candidates = ["download_url", "source_url", "asset_url", "original_url"];
+  for (const key of candidates) {
+    const candidate = readString(fileLike[key]);
+    if (candidate && !isFrameIoViewUrl(candidate)) {
+      return candidate;
+    }
+  }
   return null;
 }
 

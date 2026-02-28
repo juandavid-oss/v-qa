@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { parseFrameIoUrl, resolveFrameIoMetadata } from "@/lib/frame-io";
+import { isFrameIoViewUrl, parseFrameIoUrl, resolveFrameIoMetadata } from "@/lib/frame-io";
 import { FrameAuthError, getValidFrameToken } from "@/lib/frame-io-auth";
 import { getGcpIdentityToken } from "@/lib/gcp-auth";
 
@@ -38,8 +38,17 @@ export async function POST(request: Request) {
 
   try {
     let resolvedVideoUrl = project.video_url as string | null;
+    const hasInvalidStoredVideoUrl = Boolean(resolvedVideoUrl && isFrameIoViewUrl(resolvedVideoUrl));
 
-    // Ensure Cloud Function receives a direct video URL and doesn't need token logic.
+    if (hasInvalidStoredVideoUrl) {
+      console.warn("Stored project.video_url points to a Frame.io page URL; re-resolving asset metadata", {
+        project_id: project.id,
+        video_url: resolvedVideoUrl,
+      });
+      resolvedVideoUrl = null;
+    }
+
+    // Ensure Cloud Function receives a direct downloadable URL and doesn't need token logic.
     if (!resolvedVideoUrl && project.frame_io_url) {
       const assetId = parseFrameIoUrl(project.frame_io_url);
       if (!assetId) {
