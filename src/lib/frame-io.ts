@@ -1,5 +1,14 @@
 const FRAME_IO_V4_API = "https://api.frame.io/v4";
 const FRAME_WEB_HOSTS = new Set(["frame.io", "www.frame.io", "app.frame.io", "next.frame.io", "f.io"]);
+const FRAME_MEDIA_LINK_INCLUDES = [
+  "media_links.original",
+  "media_links.thumbnail",
+  "media_links.thumbnail_high_quality",
+  "media_links.video_h264_180",
+  "media_links.high_quality",
+  "media_links.efficient",
+  "media_links.scrub_sheet",
+].join(",");
 const VIDEO_EXT_RE = /\.(mp4|mov|m4v|webm|avi|mkv|mxf)(\?|$)/i;
 const IMAGE_EXT_RE = /\.(jpg|jpeg|png|webp|gif|svg|avif)(\?|$)/i;
 const POSITIVE_URL_HINTS = ["video", "download", "source", "original", "proxy", "stream", "transcode", "playback"];
@@ -163,8 +172,9 @@ export async function getFrameAccountId(token: string): Promise<string> {
 }
 
 export async function getFileById(accountId: string, fileId: string, token: string): Promise<JsonRecord> {
+  const include = encodeURIComponent(FRAME_MEDIA_LINK_INCLUDES);
   const payload = await fetchFrameIoV4(
-    `/accounts/${encodeURIComponent(accountId)}/files/${encodeURIComponent(fileId)}?include=media_links`,
+    `/accounts/${encodeURIComponent(accountId)}/files/${encodeURIComponent(fileId)}?include=${include}`,
     token
   );
   return unwrapObjectData(payload, "file");
@@ -175,8 +185,9 @@ export async function getVersionStackById(
   versionStackId: string,
   token: string
 ): Promise<JsonRecord> {
+  const include = encodeURIComponent(FRAME_MEDIA_LINK_INCLUDES);
   const payload = await fetchFrameIoV4(
-    `/accounts/${encodeURIComponent(accountId)}/version_stacks/${encodeURIComponent(versionStackId)}?include=media_links`,
+    `/accounts/${encodeURIComponent(accountId)}/version_stacks/${encodeURIComponent(versionStackId)}?include=${include}`,
     token
   );
   return unwrapObjectData(payload, "version stack");

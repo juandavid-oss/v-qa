@@ -55,6 +55,15 @@ LANGUAGETOOL_URL = os.environ.get("LANGUAGETOOL_URL", "https://api.languagetool.
 CLOUD_FUNCTION_SECRET = os.environ.get("CLOUD_FUNCTION_SECRET")
 FRAME_IO_TOKEN = os.environ.get("FRAME_IO_TOKEN") or os.environ.get("FRAME_IO_V4_TOKEN")
 FRAME_IO_V4_API = "https://api.frame.io/v4"
+FRAME_MEDIA_LINK_INCLUDES = ",".join((
+    "media_links.original",
+    "media_links.thumbnail",
+    "media_links.thumbnail_high_quality",
+    "media_links.video_h264_180",
+    "media_links.high_quality",
+    "media_links.efficient",
+    "media_links.scrub_sheet",
+))
 VIDEO_EXT_RE = re.compile(r"\.(mp4|mov|m4v|webm|avi|mkv|mxf)(\?|$)", re.IGNORECASE)
 IMAGE_EXT_RE = re.compile(r"\.(jpg|jpeg|png|webp|gif|svg|avif)(\?|$)", re.IGNORECASE)
 POSITIVE_URL_HINTS = ("video", "download", "source", "original", "proxy", "stream", "transcode", "playback")
@@ -163,16 +172,18 @@ def get_frame_account_id(token: str) -> str:
 
 
 def get_file_by_id(account_id: str, file_id: str, token: str) -> dict:
+    include = requests.utils.quote(FRAME_MEDIA_LINK_INCLUDES, safe="")
     payload = frame_v4_get(
-        f"/accounts/{account_id}/files/{file_id}?include=media_links",
+        f"/accounts/{account_id}/files/{file_id}?include={include}",
         token,
     )
     return unwrap_data_object(payload, "file")
 
 
 def get_version_stack_by_id(account_id: str, version_stack_id: str, token: str) -> dict:
+    include = requests.utils.quote(FRAME_MEDIA_LINK_INCLUDES, safe="")
     payload = frame_v4_get(
-        f"/accounts/{account_id}/version_stacks/{version_stack_id}?include=media_links",
+        f"/accounts/{account_id}/version_stacks/{version_stack_id}?include={include}",
         token,
     )
     return unwrap_data_object(payload, "version_stack")
