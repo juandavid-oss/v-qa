@@ -1,13 +1,38 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { ProjectStatus } from "@/types/database";
 
 export function useRealtimeProgress(projectId: string) {
   const [status, setStatus] = useState<ProjectStatus>("pending");
   const [progress, setProgress] = useState(0);
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const refreshFromDb = async () => {
+      const { data, error } = await supabase
+        .from("projects")
+        .select("status,progress")
+        .eq("id", projectId)
+        .single();
+
+      if (cancelled || error || !data) return;
+      setStatus(data.status as ProjectStatus);
+      setProgress(Number(data.progress ?? 0));
+    };
+
+    // Polling fallback in case Realtime channel misses events.
+    refreshFromDb();
+    const intervalId = setInterval(refreshFromDb, 4000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [projectId, supabase]);
 
   useEffect(() => {
     const channel = supabase

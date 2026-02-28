@@ -431,10 +431,27 @@ def read_number(value) -> float | None:
 
 
 def update_status(supabase, project_id: str, status: str, progress: int):
-    supabase.table("projects").update({
-        "status": status,
-        "progress": progress,
-    }).eq("id", project_id).execute()
+    response = (
+        supabase.table("projects")
+        .update({
+            "status": status,
+            "progress": progress,
+        })
+        .eq("id", project_id)
+        .select("id,status,progress")
+        .execute()
+    )
+    rows = getattr(response, "data", None)
+    if isinstance(rows, list) and rows:
+        print(
+            f"Project {project_id} status updated to {status} ({progress}%)",
+            flush=True,
+        )
+    else:
+        print(
+            f"WARNING: status update affected 0 rows for project {project_id} -> {status} ({progress}%)",
+            flush=True,
+        )
 
 
 def clear_previous_results(supabase, project_id: str):
@@ -698,7 +715,10 @@ Return ONLY valid JSON, no markdown or other text."""
             try:
                 print(f"Transcribing with Gemini model: {model_name}", flush=True)
                 model = genai.GenerativeModel(model_name)
-                response = model.generate_content([prompt, audio_file])
+                response = model.generate_content(
+                    [prompt, audio_file],
+                    request_options={"timeout": 600},
+                )
                 text = (response.text or "").strip()
                 if not text:
                     raise RuntimeError("Gemini returned an empty transcription response")
