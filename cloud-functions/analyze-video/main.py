@@ -2,6 +2,7 @@ import os
 import re
 import stat
 import tarfile
+import time
 import traceback
 import uuid
 import subprocess
@@ -430,28 +431,34 @@ def read_number(value) -> float | None:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-def update_status(supabase, project_id: str, status: str, progress: int):
+def update_status(supabase, project_id: str, status: str, progress: int, debug_msg: str = ""):
+    """Update project status and optionally store a debug message in error_message.
+
+    The debug_msg is stored in `error_message` so the frontend can show real-time
+    step-by-step progress via Supabase Realtime.  It is cleared when status=completed.
+    """
+    update_data: dict = {
+        "status": status,
+        "progress": progress,
+    }
+    if debug_msg:
+        update_data["error_message"] = f"[DEBUG] {debug_msg}"
+    if status == "completed":
+        update_data["error_message"] = None
+
     response = (
         supabase.table("projects")
-        .update({
-            "status": status,
-            "progress": progress,
-        })
+        .update(update_data)
         .eq("id", project_id)
         .select("id,status,progress")
         .execute()
     )
     rows = getattr(response, "data", None)
+    log_line = f"[{status} {progress}%] {debug_msg}" if debug_msg else f"[{status} {progress}%]"
     if isinstance(rows, list) and rows:
-        print(
-            f"Project {project_id} status updated to {status} ({progress}%)",
-            flush=True,
-        )
+        print(f"  >> {log_line}", flush=True)
     else:
-        print(
-            f"WARNING: status update affected 0 rows for project {project_id} -> {status} ({progress}%)",
-            flush=True,
-        )
+        print(f"  >> WARNING: 0 rows updated — {log_line}", flush=True)
 
 
 def clear_previous_results(supabase, project_id: str):
@@ -973,8 +980,11 @@ def store_mismatches(supabase, project_id: str, mismatches: list[dict]):
 @functions_framework.http
 def analyze_video(request):
     """HTTP Cloud Function: orchestrates the full video analysis pipeline."""
+    t0 = time.time()
+    print("=" * 60, flush=True)
+    print("analyze_video STARTED", flush=True)
+
     # IAM auth on the Cloud Run service is the primary gatekeeper.
-    # Keep shared-secret env var for compatibility, but don't hard-fail here.
     if CLOUD_FUNCTION_SECRET:
         secret_header = request.headers.get("X-Function-Secret", "")
         if secret_header != CLOUD_FUNCTION_SECRET:
@@ -988,6 +998,10 @@ def analyze_video(request):
     video_url = data.get("video_url")
     frame_io_url = data.get("frame_io_url")
 
+    print(f"project_id: {project_id}", flush=True)
+    print(f"video_url:  {(video_url or '')[:120]}", flush=True)
+    print(f"frame_io_url: {frame_io_url}", flush=True)
+
     if not project_id:
         return {"error": "Missing project_id"}, 400
 
@@ -1000,14 +1014,27 @@ def analyze_video(request):
 
             clear_previous_results(supabase, project_id)
 
-            # Step 1: Download video
-            update_status(supabase, project_id, "fetching_video", 10)
+            # ── Step 1: Download video ──────────────────────────────
+            t1 = time.time()
+            update_status(supabase, project_id, "fetching_video", 10,
+                          "Downloading video...")
             video_path = download_video(video_url, tmp_dir)
+            file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+            elapsed = time.time() - t1
+            update_status(supabase, project_id, "fetching_video", 15,
+                          f"Video downloaded: {file_size_mb:.1f} MB in {elapsed:.1f}s")
 
-            # Step 2: Detect text in video
-            update_status(supabase, project_id, "detecting_text", 20)
+            # ── Step 2: Detect text in video (Video Intelligence) ───
+            t2 = time.time()
+            update_status(supabase, project_id, "detecting_text", 20,
+                          "Sending video to Google Video Intelligence API...")
             raw_detections = detect_text_in_video(video_path)
+            elapsed = time.time() - t2
+            update_status(supabase, project_id, "detecting_text", 30,
+                          f"Video Intelligence done: {len(raw_detections)} raw text detections in {elapsed:.1f}s")
+
             merged = merge_partial_sequences(raw_detections)
+            print(f"  Merged partial sequences: {len(raw_detections)} -> {len(merged)} detections", flush=True)
 
             # Get video duration for classification
             _ensure_ffmpeg()
@@ -1017,45 +1044,74 @@ def analyze_video(request):
                 capture_output=True, text=True,
             )
             video_duration = float(probe.stdout.strip()) if probe.stdout.strip() else 0
+            print(f"  Video duration: {video_duration:.1f}s", flush=True)
 
             classified = classify_subtitle_vs_fixed(merged, video_duration)
+            n_subtitles = sum(1 for d in classified if d.get("is_subtitle"))
+            n_fixed = sum(1 for d in classified if d.get("is_fixed_text"))
             store_text_detections(supabase, project_id, classified)
-            update_status(supabase, project_id, "detecting_text", 40)
+            update_status(supabase, project_id, "detecting_text", 40,
+                          f"Text classified: {n_subtitles} subtitles, {n_fixed} fixed texts")
 
-            # Step 3: Transcribe audio
-            update_status(supabase, project_id, "transcribing_audio", 50)
+            # ── Step 3: Transcribe audio (Gemini) ───────────────────
+            t3 = time.time()
+            update_status(supabase, project_id, "transcribing_audio", 50,
+                          "Extracting audio track with ffmpeg...")
             audio_path = extract_audio(video_path, tmp_dir)
-            transcription_segments = transcribe_with_gemini(audio_path)
-            store_transcriptions(supabase, project_id, transcription_segments)
-            update_status(supabase, project_id, "transcribing_audio", 65)
+            audio_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+            print(f"  Audio extracted: {audio_size_mb:.1f} MB", flush=True)
 
-            # Step 4: Check spelling
-            update_status(supabase, project_id, "checking_spelling", 70)
+            update_status(supabase, project_id, "transcribing_audio", 55,
+                          "Sending audio to Gemini for transcription...")
+            transcription_segments = transcribe_with_gemini(audio_path)
+            elapsed = time.time() - t3
+            store_transcriptions(supabase, project_id, transcription_segments)
+            update_status(supabase, project_id, "transcribing_audio", 65,
+                          f"Transcription done: {len(transcription_segments)} segments in {elapsed:.1f}s")
+
+            # ── Step 4: Check spelling (LanguageTool) ───────────────
+            t4 = time.time()
             subtitle_texts = [
                 {"text": d["text"], "start_time": d["start_time"]}
                 for d in classified
                 if d.get("is_subtitle") and not d.get("is_partial_sequence")
             ]
+            update_status(supabase, project_id, "checking_spelling", 70,
+                          f"Checking spelling on {len(subtitle_texts)} subtitle segments...")
             spelling_errors = check_spelling(subtitle_texts)
             filtered_errors = filter_false_positives(spelling_errors, classified)
             store_spelling_errors(supabase, project_id, filtered_errors)
-            update_status(supabase, project_id, "checking_spelling", 80)
+            elapsed = time.time() - t4
+            update_status(supabase, project_id, "checking_spelling", 80,
+                          f"Spelling done: {len(spelling_errors)} raw, {len(filtered_errors)} after filtering in {elapsed:.1f}s")
 
-            # Step 5: Detect mismatches
-            update_status(supabase, project_id, "detecting_mismatches", 85)
+            # ── Step 5: Detect mismatches ───────────────────────────
+            t5 = time.time()
+            update_status(supabase, project_id, "detecting_mismatches", 85,
+                          "Comparing subtitles against transcription...")
             mismatches = detect_mismatches(classified, transcription_segments)
             store_mismatches(supabase, project_id, mismatches)
+            elapsed = time.time() - t5
+            update_status(supabase, project_id, "detecting_mismatches", 95,
+                          f"Mismatches done: {len(mismatches)} found in {elapsed:.1f}s")
 
-            # Done
+            # ── Done ────────────────────────────────────────────────
+            total_elapsed = time.time() - t0
             update_status(supabase, project_id, "completed", 100)
+            print(f"analyze_video COMPLETED in {total_elapsed:.1f}s", flush=True)
+            print("=" * 60, flush=True)
 
         return {"status": "completed", "project_id": project_id}, 200
 
     except Exception as e:
-        print(f"ERROR in analyze_video: {e}", flush=True)
+        total_elapsed = time.time() - t0
+        print(f"ERROR in analyze_video after {total_elapsed:.1f}s: {e}", flush=True)
         traceback.print_exc()
-        update_status(supabase, project_id, "error", 0)
-        supabase.table("projects").update({
-            "error_message": str(e)[:500],
-        }).eq("id", project_id).execute()
+        try:
+            update_status(supabase, project_id, "error", 0)
+            supabase.table("projects").update({
+                "error_message": str(e)[:500],
+            }).eq("id", project_id).execute()
+        except Exception as db_err:
+            print(f"Failed to update error status in DB: {db_err}", flush=True)
         return {"error": str(e)}, 500

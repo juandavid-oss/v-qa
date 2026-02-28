@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { isFrameIoViewUrl, parseFrameIoUrl, resolveFrameIoMetadata } from "@/lib/frame-io";
+import { parseFrameIoUrl, resolveFrameIoMetadata } from "@/lib/frame-io";
 import { FrameAuthError, getValidFrameToken } from "@/lib/frame-io-auth";
 import { getGcpIdentityToken } from "@/lib/gcp-auth";
 
@@ -37,19 +37,10 @@ export async function POST(request: Request) {
   }
 
   try {
-    let resolvedVideoUrl = project.video_url as string | null;
-    const hasInvalidStoredVideoUrl = Boolean(resolvedVideoUrl && isFrameIoViewUrl(resolvedVideoUrl));
+    // Always re-resolve Frame.io URLs — download URLs are signed and expire.
+    let resolvedVideoUrl: string | null = null;
 
-    if (hasInvalidStoredVideoUrl) {
-      console.warn("Stored project.video_url points to a Frame.io page URL; re-resolving asset metadata", {
-        project_id: project.id,
-        video_url: resolvedVideoUrl,
-      });
-      resolvedVideoUrl = null;
-    }
-
-    // Ensure Cloud Function receives a direct downloadable URL and doesn't need token logic.
-    if (!resolvedVideoUrl && project.frame_io_url) {
+    if (project.frame_io_url) {
       const assetId = parseFrameIoUrl(project.frame_io_url);
       if (!assetId) {
         throw new Error("Invalid Frame.io URL");
@@ -60,7 +51,10 @@ export async function POST(request: Request) {
       resolvedVideoUrl = metadata.video_url;
 
       if (!resolvedVideoUrl) {
-        throw new Error("Frame.io resolved but no downloadable video URL was found");
+        throw new Error(
+          "Frame.io resolved but no downloadable video URL was found. " +
+          "The V4 API may not be returning media_links for this asset."
+        );
       }
 
       await supabase
@@ -73,42 +67,63 @@ export async function POST(request: Request) {
           error_message: null,
         })
         .eq("id", project_id);
+    } else if (project.video_url) {
+      resolvedVideoUrl = project.video_url as string;
     }
 
     if (!resolvedVideoUrl) {
       throw new Error("No video URL available");
     }
 
-    // Trigger the Cloud Function with GCP Identity Token for IAM auth
-    const identityToken = await getGcpIdentityToken(cloudFunctionUrl);
-    const response = await fetch(cloudFunctionUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${identityToken}`,
-        ...(cloudFunctionSecret ? { "X-Function-Secret": cloudFunctionSecret } : {}),
-      },
-      body: JSON.stringify({
-        project_id: project.id,
-        video_url: resolvedVideoUrl,
-        frame_io_url: project.frame_io_url,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => "");
-      const trimmed = errorText.replace(/\s+/g, " ").trim();
-      throw new Error(
-        `Cloud Function returned ${response.status}${trimmed ? `: ${trimmed.slice(0, 240)}` : ""}`
-      );
-    }
-
-    // Update project status to indicate processing started
+    // Set status BEFORE calling CF — the CF will update status from here on.
     await supabase
       .from("projects")
       .update({ status: "fetching_video", progress: 5, error_message: null })
       .eq("id", project_id);
 
+    // Trigger the Cloud Function with GCP Identity Token for IAM auth.
+    // Use a 10s timeout — we only need to confirm the CF accepted the request.
+    // The CF runs for minutes; it updates Supabase directly. We don't block.
+    const identityToken = await getGcpIdentityToken(cloudFunctionUrl);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10_000);
+
+    try {
+      const response = await fetch(cloudFunctionUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${identityToken}`,
+          ...(cloudFunctionSecret ? { "X-Function-Secret": cloudFunctionSecret } : {}),
+        },
+        body: JSON.stringify({
+          project_id: project.id,
+          video_url: resolvedVideoUrl,
+          frame_io_url: project.frame_io_url,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      // If CF responded quickly with an error, report it
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "");
+        const trimmed = errorText.replace(/\s+/g, " ").trim();
+        throw new Error(
+          `Cloud Function returned ${response.status}${trimmed ? `: ${trimmed.slice(0, 240)}` : ""}`
+        );
+      }
+    } catch (error) {
+      clearTimeout(timeoutId);
+      // AbortError = timeout = CF is still processing. This is expected.
+      if (error instanceof Error && error.name === "AbortError") {
+        console.log("CF request timed out locally — CF continues processing in GCP");
+      } else {
+        throw error;
+      }
+    }
+
+    // Don't update status here — the CF manages its own status in Supabase.
     return NextResponse.json({ status: "processing" });
   } catch (error) {
     const message =
