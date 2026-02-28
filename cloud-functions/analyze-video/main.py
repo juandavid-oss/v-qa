@@ -55,6 +55,10 @@ LANGUAGETOOL_URL = os.environ.get("LANGUAGETOOL_URL", "https://api.languagetool.
 CLOUD_FUNCTION_SECRET = os.environ.get("CLOUD_FUNCTION_SECRET")
 FRAME_IO_TOKEN = os.environ.get("FRAME_IO_TOKEN") or os.environ.get("FRAME_IO_V4_TOKEN")
 FRAME_IO_V4_API = "https://api.frame.io/v4"
+VIDEO_EXT_RE = re.compile(r"\.(mp4|mov|m4v|webm|avi|mkv|mxf)(\?|$)", re.IGNORECASE)
+IMAGE_EXT_RE = re.compile(r"\.(jpg|jpeg|png|webp|gif|svg|avif)(\?|$)", re.IGNORECASE)
+POSITIVE_URL_HINTS = ("video", "download", "source", "original", "proxy", "stream", "transcode", "playback")
+NEGATIVE_URL_HINTS = ("thumbnail", "thumb", "poster", "sprite", "waveform", "image")
 
 
 def get_supabase():
@@ -196,7 +200,11 @@ def extract_frame_metadata(file_data: dict) -> dict:
     if not isinstance(media_links, dict):
         media_links = {}
 
-    video_url = pick_video_link(media_links) or pick_top_level_video_link(file_data)
+    video_url = (
+        pick_video_link(media_links)
+        or pick_top_level_video_link(file_data)
+        or pick_heuristic_video_link(file_data)
+    )
 
     thumbnail_url = media_link_to_url(media_links.get("thumbnail")) or find_thumbnail_link(media_links)
     if not thumbnail_url:
@@ -267,6 +275,71 @@ def pick_top_level_video_link(file_data: dict) -> str | None:
         if candidate and not is_frame_view_url(candidate):
             return candidate
     return None
+
+
+def pick_heuristic_video_link(root: dict) -> str | None:
+    best_url = None
+    best_score = 0
+    stack = [(root, "root", 0)]
+    visited = 0
+
+    while stack and visited < 2000:
+        value, path, depth = stack.pop()
+        visited += 1
+        if depth > 8:
+            continue
+
+        if isinstance(value, str):
+            score = score_candidate_video_url(value, path)
+            if score > best_score:
+                best_score = score
+                best_url = value
+            continue
+
+        if isinstance(value, list):
+            for index, entry in enumerate(value):
+                stack.append((entry, f"{path}[{index}]", depth + 1))
+            continue
+
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                stack.append((nested, f"{path}.{key}", depth + 1))
+
+    return best_url
+
+
+def score_candidate_video_url(url: str, path: str) -> int:
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return -100
+
+    if parsed.scheme not in ("http", "https"):
+        return -100
+    if is_frame_view_url(url):
+        return -100
+
+    lower_url = url.lower()
+    lower_path = path.lower()
+    score = 0
+
+    if VIDEO_EXT_RE.search(lower_url):
+        score += 8
+    if "response-content-type=video" in lower_url or "content-type=video" in lower_url:
+        score += 6
+
+    for hint in POSITIVE_URL_HINTS:
+        if hint in lower_url or hint in lower_path:
+            score += 2
+
+    for hint in NEGATIVE_URL_HINTS:
+        if hint in lower_url or hint in lower_path:
+            score -= 4
+
+    if IMAGE_EXT_RE.search(lower_url):
+        score -= 8
+
+    return score
 
 
 def media_link_to_url(value) -> str | None:

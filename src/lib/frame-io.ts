@@ -1,5 +1,9 @@
 const FRAME_IO_V4_API = "https://api.frame.io/v4";
 const FRAME_WEB_HOSTS = new Set(["frame.io", "www.frame.io", "app.frame.io", "next.frame.io", "f.io"]);
+const VIDEO_EXT_RE = /\.(mp4|mov|m4v|webm|avi|mkv|mxf)(\?|$)/i;
+const IMAGE_EXT_RE = /\.(jpg|jpeg|png|webp|gif|svg|avif)(\?|$)/i;
+const POSITIVE_URL_HINTS = ["video", "download", "source", "original", "proxy", "stream", "transcode", "playback"];
+const NEGATIVE_URL_HINTS = ["thumbnail", "thumb", "poster", "sprite", "waveform", "image"];
 
 type JsonRecord = Record<string, unknown>;
 
@@ -208,7 +212,10 @@ function extractMetadataFromFileLike(fileLike: JsonRecord): {
   video_url: string | null;
 } {
   const mediaLinks = isRecord(fileLike["media_links"]) ? fileLike["media_links"] : null;
-  const videoUrl = pickVideoLink(mediaLinks) || pickTopLevelVideoLink(fileLike);
+  const videoUrl =
+    pickVideoLink(mediaLinks) ||
+    pickTopLevelVideoLink(fileLike) ||
+    pickHeuristicVideoLink(fileLike);
 
   const thumbnailUrl = pickThumbnailLink(mediaLinks) || readString(fileLike["thumbnail_url"]) || null;
 
@@ -296,6 +303,71 @@ function pickTopLevelVideoLink(fileLike: JsonRecord): string | null {
     }
   }
   return null;
+}
+
+function pickHeuristicVideoLink(root: JsonRecord): string | null {
+  let best: { url: string; score: number } | null = null;
+  const stack: Array<{ value: unknown; path: string; depth: number }> = [
+    { value: root, path: "root", depth: 0 },
+  ];
+  let visited = 0;
+
+  while (stack.length > 0 && visited < 2000) {
+    const node = stack.pop();
+    if (!node) continue;
+    const { value, path, depth } = node;
+    visited += 1;
+    if (depth > 8) continue;
+
+    if (typeof value === "string") {
+      const score = scoreCandidateVideoUrl(value, path);
+      if (score > 0 && (!best || score > best.score)) {
+        best = { url: value, score };
+      }
+      continue;
+    }
+
+    if (Array.isArray(value)) {
+      value.forEach((entry, index) => {
+        stack.push({ value: entry, path: `${path}[${index}]`, depth: depth + 1 });
+      });
+      continue;
+    }
+
+    if (isRecord(value)) {
+      for (const [key, nested] of Object.entries(value)) {
+        stack.push({ value: nested, path: `${path}.${key}`, depth: depth + 1 });
+      }
+    }
+  }
+
+  return best?.url ?? null;
+}
+
+function scoreCandidateVideoUrl(url: string, path: string): number {
+  const parsed = tryParseUrl(url);
+  if (!parsed) return -100;
+  if (!/^https?:$/i.test(parsed.protocol)) return -100;
+  if (isFrameIoViewUrl(url)) return -100;
+
+  const lowerPath = path.toLowerCase();
+  const lowerUrl = url.toLowerCase();
+  let score = 0;
+
+  if (VIDEO_EXT_RE.test(lowerUrl)) score += 8;
+  if (lowerUrl.includes("response-content-type=video") || lowerUrl.includes("content-type=video")) score += 6;
+
+  for (const hint of POSITIVE_URL_HINTS) {
+    if (lowerPath.includes(hint) || lowerUrl.includes(hint)) score += 2;
+  }
+
+  for (const hint of NEGATIVE_URL_HINTS) {
+    if (lowerPath.includes(hint) || lowerUrl.includes(hint)) score -= 4;
+  }
+
+  if (IMAGE_EXT_RE.test(lowerUrl)) score -= 8;
+
+  return score;
 }
 
 function pickMediaLink(mediaLinks: JsonRecord | null, key: string): string | null {
