@@ -1,0 +1,111 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #8B5CF6;
+  --color-primary-hover: #7C3AED;
+  --color-primary-dark: #7c3aed;
+  --color-background-light: #F9FAFB;
+  --color-background-dark: #0B0A10;
+  --color-surface-dark: #16151D;
+  --color-surface-light: #FFFFFF;
+  --color-accent-purple: #A78BFA;
+
+  --font-display: "Plus Jakarta Sans", "Inter", sans-serif;
+  --font-sans: "Inter", sans-serif;
+
+  --radius: 12px;
+  --radius-xl: 16px;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #2D2B35;
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #4B4855;
+}
+
+/* Spotify-style subtitle transitions */
+.spotify-style-text {
+  transition: all 0.3s ease;
+}
+
+.active-subtitle {
+  color: white;
+  font-size: 1.25rem;
+  line-height: 1.75rem;
+  opacity: 1;
+  transform: scale(1.02);
+}
+
+.inactive-subtitle {
+  color: rgba(255, 255, 255, 0.3);
+  filter: blur(0.5px);
+}
+
+/* Timeline mismatch markers */
+.mismatch-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: theme(--color-rose-500);
+  box-shadow: 0 0 8px rgba(244, 63, 94, 0.6);
+  cursor: pointer;
+  width: 4px;
+  border-radius: 1px;
+  z-index: 10;
+  transition: background-color 0.2s;
+}
+.mismatch-marker:hover {
+  background: theme(--color-rose-400);
+}
+
+.mismatch-segment {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(244, 63, 94, 0.3);
+  border-left: 1px solid rgba(244, 63, 94, 0.5);
+  border-right: 1px solid rgba(244, 63, 94, 0.5);
+  cursor: pointer;
+  z-index: 0;
+  transition: background-color 0.2s;
+}
+.mismatch-segment:hover {
+  background: rgba(244, 63, 94, 0.4);
+}
+
+/* Status badge */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-width: 1px;
+}
+
+/* Grid background for login */
+.bg-grid-overlay {
+  background-size: 40px 40px;
+  background-image: linear-gradient(to right, #1f1d2b 1px, transparent 1px),
+    linear-gradient(to bottom, #1f1d2b 1px, transparent 1px);
+  mask-image: linear-gradient(to bottom, transparent, 10%, black, 90%, transparent);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, 10%, black, 90%, transparent);
+}
+
+/* Glow effect for login card */
+.glow-effect {
+  box-shadow: 0 0 50px -12px rgba(139, 92, 246, 0.25);
+}
