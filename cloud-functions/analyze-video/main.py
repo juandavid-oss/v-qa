@@ -711,9 +711,9 @@ def store_mismatches(supabase, project_id: str, mismatches: list[dict]):
 @functions_framework.http
 def analyze_video(request):
     """HTTP Cloud Function: orchestrates the full video analysis pipeline."""
-    # Verify auth
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header != f"Bearer {CLOUD_FUNCTION_SECRET}":
+    # Verify app-level secret (GCP IAM already validated the Identity Token in Authorization header)
+    secret_header = request.headers.get("X-Function-Secret", "")
+    if secret_header != CLOUD_FUNCTION_SECRET:
         return {"error": "Unauthorized"}, 403
 
     data = request.get_json(silent=True)

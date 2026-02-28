@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { parseFrameIoUrl, resolveFrameIoMetadata } from "@/lib/frame-io";
 import { FrameAuthError, getValidFrameToken } from "@/lib/frame-io-auth";
+import { getGcpIdentityToken } from "@/lib/gcp-auth";
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -69,12 +70,14 @@ export async function POST(request: Request) {
       throw new Error("No video URL available");
     }
 
-    // Trigger the Cloud Function
+    // Trigger the Cloud Function with GCP Identity Token for IAM auth
+    const identityToken = await getGcpIdentityToken(cloudFunctionUrl);
     const response = await fetch(cloudFunctionUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${cloudFunctionSecret}`,
+        Authorization: `Bearer ${identityToken}`,
+        "X-Function-Secret": cloudFunctionSecret,
       },
       body: JSON.stringify({
         project_id: project.id,
