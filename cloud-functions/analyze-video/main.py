@@ -446,19 +446,9 @@ def update_status(supabase, project_id: str, status: str, progress: int, debug_m
     if status == "completed":
         update_data["error_message"] = None
 
-    response = (
-        supabase.table("projects")
-        .update(update_data)
-        .eq("id", project_id)
-        .select("id,status,progress")
-        .execute()
-    )
-    rows = getattr(response, "data", None)
+    supabase.table("projects").update(update_data).eq("id", project_id).execute()
     log_line = f"[{status} {progress}%] {debug_msg}" if debug_msg else f"[{status} {progress}%]"
-    if isinstance(rows, list) and rows:
-        print(f"  >> {log_line}", flush=True)
-    else:
-        print(f"  >> WARNING: 0 rows updated — {log_line}", flush=True)
+    print(f"  >> {log_line}", flush=True)
 
 
 def clear_previous_results(supabase, project_id: str):
