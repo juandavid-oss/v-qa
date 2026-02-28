@@ -1,6 +1,7 @@
 import os
 import re
 import stat
+import tarfile
 import traceback
 import uuid
 import subprocess
@@ -34,10 +35,12 @@ def _ensure_ffmpeg():
     with open(archive_path, "wb") as f:
         for chunk in resp.iter_content(chunk_size=1 << 20):
             f.write(chunk)
-    subprocess.run(
-        ["tar", "xf", archive_path, "--strip-components=1", "-C", _FFMPEG_DIR],
-        check=True,
-    )
+    with tarfile.open(archive_path, "r:xz") as tar:
+        for member in tar.getmembers():
+            basename = os.path.basename(member.name)
+            if basename in ("ffmpeg", "ffprobe"):
+                member.name = basename
+                tar.extract(member, _FFMPEG_DIR)
     os.remove(archive_path)
     for binary in [_FFMPEG_PATH, _FFPROBE_PATH]:
         st = os.stat(binary)
