@@ -1,11 +1,13 @@
 "use client";
 
+import { useState } from "react";
 import type { ProjectStatus } from "@/types/database";
 import { statusLabel } from "@/lib/utils";
 
 interface ProcessingOverlayProps {
   status: ProjectStatus;
   progress: number;
+  debugMessage?: string | null;
 }
 
 const STEPS: { status: ProjectStatus; label: string; icon: string }[] = [
@@ -16,10 +18,17 @@ const STEPS: { status: ProjectStatus; label: string; icon: string }[] = [
   { status: "detecting_mismatches", label: "Detecting Mismatches", icon: "compare" },
 ];
 
-export default function ProcessingOverlay({ status, progress }: ProcessingOverlayProps) {
+export default function ProcessingOverlay({ status, progress, debugMessage }: ProcessingOverlayProps) {
+  const [showDebug, setShowDebug] = useState(true);
+
   if (status === "completed" || status === "error") return null;
 
   const currentStepIndex = STEPS.findIndex((s) => s.status === status);
+
+  // Extract the actual message from "[DEBUG] ..." prefix
+  const cleanDebug = debugMessage?.startsWith("[DEBUG] ")
+    ? debugMessage.slice(8)
+    : debugMessage;
 
   return (
     <div className="absolute inset-0 z-30 bg-background-dark/90 backdrop-blur-sm flex items-center justify-center">
@@ -76,6 +85,33 @@ export default function ProcessingOverlay({ status, progress }: ProcessingOverla
               </div>
             );
           })}
+        </div>
+
+        {/* Debug log section */}
+        <div className="mt-6 border-t border-slate-800 pt-4">
+          <button
+            onClick={() => setShowDebug(!showDebug)}
+            className="flex items-center gap-2 text-xs text-slate-500 hover:text-slate-400 transition-colors w-full"
+          >
+            <span className="material-symbols-outlined text-sm">
+              {showDebug ? "expand_less" : "expand_more"}
+            </span>
+            <span className="font-mono uppercase tracking-wider">Debug Log</span>
+          </button>
+          {showDebug && cleanDebug && (
+            <div className="mt-2 bg-slate-900/80 border border-slate-800 rounded-lg px-3 py-2">
+              <p className="text-xs font-mono text-amber-400/90 break-words">
+                {cleanDebug}
+              </p>
+            </div>
+          )}
+          {showDebug && !cleanDebug && (
+            <div className="mt-2 bg-slate-900/80 border border-slate-800 rounded-lg px-3 py-2">
+              <p className="text-xs font-mono text-slate-600 italic">
+                Waiting for Cloud Function...
+              </p>
+            </div>
+          )}
         </div>
       </div>
     </div>

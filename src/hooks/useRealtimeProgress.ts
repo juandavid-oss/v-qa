@@ -7,6 +7,7 @@ import type { ProjectStatus } from "@/types/database";
 export function useRealtimeProgress(projectId: string) {
   const [status, setStatus] = useState<ProjectStatus>("pending");
   const [progress, setProgress] = useState(0);
+  const [debugMessage, setDebugMessage] = useState<string | null>(null);
   const supabase = useMemo(() => createClient(), []);
 
   useEffect(() => {
@@ -15,13 +16,14 @@ export function useRealtimeProgress(projectId: string) {
     const refreshFromDb = async () => {
       const { data, error } = await supabase
         .from("projects")
-        .select("status,progress")
+        .select("status,progress,error_message")
         .eq("id", projectId)
         .single();
 
       if (cancelled || error || !data) return;
       setStatus(data.status as ProjectStatus);
       setProgress(Number(data.progress ?? 0));
+      setDebugMessage(data.error_message ?? null);
     };
 
     // Polling fallback in case Realtime channel misses events.
@@ -46,9 +48,14 @@ export function useRealtimeProgress(projectId: string) {
           filter: `id=eq.${projectId}`,
         },
         (payload) => {
-          const updated = payload.new as { status: ProjectStatus; progress: number };
+          const updated = payload.new as {
+            status: ProjectStatus;
+            progress: number;
+            error_message: string | null;
+          };
           setStatus(updated.status);
           setProgress(updated.progress);
+          setDebugMessage(updated.error_message ?? null);
         }
       )
       .subscribe();
@@ -58,5 +65,5 @@ export function useRealtimeProgress(projectId: string) {
     };
   }, [projectId, supabase]);
 
-  return { status, progress, setStatus, setProgress };
+  return { status, progress, debugMessage, setStatus, setProgress, setDebugMessage };
 }

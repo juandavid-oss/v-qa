@@ -34,7 +34,7 @@ export default function ProjectDetailPage() {
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
 
-  const { status, progress, setStatus, setProgress } = useRealtimeProgress(projectId);
+  const { status, progress, debugMessage, setStatus, setProgress, setDebugMessage } = useRealtimeProgress(projectId);
 
   const fetchProjectData = useCallback(async () => {
     setLoading(true);
@@ -52,6 +52,7 @@ export default function ProjectDetailPage() {
       setStatus(p.status);
       setProgress(p.progress);
       setAnalysisError(p.status === "error" ? p.error_message : null);
+      setDebugMessage(p.error_message ?? null);
     }
 
     // Fetch text detections
@@ -232,7 +233,7 @@ export default function ProjectDetailPage() {
         onAnalyze={handleAnalyze}
       />
 
-      {isProcessing && <ProcessingOverlay status={status} progress={progress} />}
+      {isProcessing && <ProcessingOverlay status={status} progress={progress} debugMessage={debugMessage} />}
 
       <main className="p-6 max-w-[1600px] mx-auto pb-24 w-full">
         {analysisError && (
