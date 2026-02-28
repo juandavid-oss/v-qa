@@ -309,11 +309,23 @@ def clear_previous_results(supabase, project_id: str):
 # --- 1. Video Download ---
 def download_video(video_url: str, tmp_dir: str) -> str:
     video_path = os.path.join(tmp_dir, "video.mp4")
+    print(f"Downloading video from: {video_url[:120]}...", flush=True)
     response = requests.get(video_url, stream=True, timeout=600)
     response.raise_for_status()
+    content_type = response.headers.get("Content-Type", "unknown")
+    print(f"Response Content-Type: {content_type}", flush=True)
+    total = 0
     with open(video_path, "wb") as f:
         for chunk in response.iter_content(chunk_size=8192):
             f.write(chunk)
+            total += len(chunk)
+    size_mb = total / (1024 * 1024)
+    print(f"Downloaded {size_mb:.1f} MB to {video_path}", flush=True)
+    if total < 1000:
+        # Likely an error page, not a video
+        with open(video_path, "r", errors="replace") as f:
+            preview = f.read(500)
+        print(f"WARNING: File too small, content preview: {preview}", flush=True)
     return video_path
 
 
