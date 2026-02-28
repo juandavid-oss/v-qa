@@ -1,5 +1,7 @@
 import os
 import re
+import stat
+import traceback
 import uuid
 import subprocess
 import tempfile
@@ -11,6 +13,36 @@ import requests
 from google.cloud import videointelligence_v1 as vi
 import google.generativeai as genai
 from supabase import create_client
+
+
+# --- FFmpeg/FFprobe setup (not included in Cloud Functions python311 runtime) ---
+_FFMPEG_DIR = "/tmp/ffmpeg-bin"
+_FFMPEG_PATH = os.path.join(_FFMPEG_DIR, "ffmpeg")
+_FFPROBE_PATH = os.path.join(_FFMPEG_DIR, "ffprobe")
+_FFMPEG_URL = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+
+
+def _ensure_ffmpeg():
+    """Download a static ffmpeg/ffprobe build if not already cached in /tmp."""
+    if os.path.isfile(_FFMPEG_PATH) and os.path.isfile(_FFPROBE_PATH):
+        return
+    os.makedirs(_FFMPEG_DIR, exist_ok=True)
+    print("Downloading static ffmpeg build...", flush=True)
+    archive_path = os.path.join(_FFMPEG_DIR, "ffmpeg.tar.xz")
+    resp = requests.get(_FFMPEG_URL, stream=True, timeout=120)
+    resp.raise_for_status()
+    with open(archive_path, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=1 << 20):
+            f.write(chunk)
+    subprocess.run(
+        ["tar", "xf", archive_path, "--strip-components=1", "-C", _FFMPEG_DIR],
+        check=True,
+    )
+    os.remove(archive_path)
+    for binary in [_FFMPEG_PATH, _FFPROBE_PATH]:
+        st = os.stat(binary)
+        os.chmod(binary, st.st_mode | stat.S_IEXEC)
+    print("ffmpeg ready.", flush=True)
 
 # --- Configuration ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -466,12 +498,16 @@ def classify_subtitle_vs_fixed(detections: list[dict], video_duration: float) ->
 
 # --- 5. Audio Transcription (Gemini) ---
 def extract_audio(video_path: str, tmp_dir: str) -> str:
+    _ensure_ffmpeg()
     audio_path = os.path.join(tmp_dir, "audio.wav")
-    subprocess.run(
-        ["ffmpeg", "-i", video_path, "-vn", "-acodec", "pcm_s16le",
+    result = subprocess.run(
+        [_FFMPEG_PATH, "-i", video_path, "-vn", "-acodec", "pcm_s16le",
          "-ar", "16000", "-ac", "1", audio_path, "-y"],
-        check=True, capture_output=True,
+        capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        print(f"ffmpeg stderr: {result.stderr}", flush=True)
+        raise RuntimeError(f"ffmpeg failed: {result.stderr[-500:]}")
     return audio_path
 
 
@@ -746,8 +782,9 @@ def analyze_video(request):
             merged = merge_partial_sequences(raw_detections)
 
             # Get video duration for classification
+            _ensure_ffmpeg()
             probe = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                [_FFPROBE_PATH, "-v", "error", "-show_entries", "format=duration",
                  "-of", "default=noprint_wrappers=1:nokey=1", video_path],
                 capture_output=True, text=True,
             )
@@ -787,6 +824,8 @@ def analyze_video(request):
         return {"status": "completed", "project_id": project_id}, 200
 
     except Exception as e:
+        print(f"ERROR in analyze_video: {e}", flush=True)
+        traceback.print_exc()
         update_status(supabase, project_id, "error", 0)
         supabase.table("projects").update({
             "error_message": str(e)[:500],
