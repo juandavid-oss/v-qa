@@ -29,9 +29,9 @@ export async function POST(request: Request) {
   const cloudFunctionUrl = process.env.CLOUD_FUNCTION_ANALYZE_URL;
   const cloudFunctionSecret = process.env.CLOUD_FUNCTION_SECRET;
 
-  if (!cloudFunctionUrl || !cloudFunctionSecret) {
+  if (!cloudFunctionUrl) {
     return NextResponse.json(
-      { error: "Cloud Function not configured" },
+      { error: "Cloud Function URL is not configured" },
       { status: 500 }
     );
   }
@@ -86,7 +86,7 @@ export async function POST(request: Request) {
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${identityToken}`,
-        "X-Function-Secret": cloudFunctionSecret,
+        ...(cloudFunctionSecret ? { "X-Function-Secret": cloudFunctionSecret } : {}),
       },
       body: JSON.stringify({
         project_id: project.id,
@@ -96,7 +96,11 @@ export async function POST(request: Request) {
     });
 
     if (!response.ok) {
-      throw new Error(`Cloud Function returned ${response.status}`);
+      const errorText = await response.text().catch(() => "");
+      const trimmed = errorText.replace(/\s+/g, " ").trim();
+      throw new Error(
+        `Cloud Function returned ${response.status}${trimmed ? `: ${trimmed.slice(0, 240)}` : ""}`
+      );
     }
 
     // Update project status to indicate processing started
