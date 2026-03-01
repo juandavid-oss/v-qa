@@ -790,7 +790,17 @@ def _resolve_sequence(sequence: list[dict]) -> dict:
 
 
 # --- 4. Subtitle vs Fixed Text Classification ---
-def classify_subtitle_vs_fixed(detections: list[dict], video_duration: float) -> list[dict]:
+def _normalize_repetition_text(text: str) -> str:
+    """Normalize text key for repetition checks (case/spacing-insensitive)."""
+    value = (text or "").strip().lower()
+    return re.sub(r"\s+", " ", value)
+
+
+def classify_subtitle_vs_fixed(
+    detections: list[dict],
+    video_duration: float,
+    debug_scores: bool = False,
+) -> list[dict]:
     """Classify each detection as subtitle or fixed text."""
     for det in detections:
         score_subtitle = 0
@@ -819,17 +829,40 @@ def classify_subtitle_vs_fixed(detections: list[dict], video_duration: float) ->
             score_fixed += 1
 
         # Repetition heuristic
+        norm_text = _normalize_repetition_text(det.get("text", ""))
         same_text_same_pos = sum(
             1 for d in detections
-            if d["text"] == det["text"]
+            if _normalize_repetition_text(d.get("text", "")) == norm_text
             and d is not det
-            and bbox_overlap(d["bbox"], det["bbox"]) > 0.9
+            and bbox_overlap(d["bbox"], det["bbox"]) >= 0.85
         )
-        if same_text_same_pos > 3:
-            score_fixed += 3
+        if same_text_same_pos >= 3:
+            score_fixed += 4
 
         det["is_subtitle"] = score_subtitle > score_fixed
         det["is_fixed_text"] = score_fixed > score_subtitle
+        det["repeat_count"] = same_text_same_pos
+        det["score_subtitle"] = score_subtitle
+        det["score_fixed"] = score_fixed
+        det["decision_reason"] = (
+            "subtitle_score_higher"
+            if score_subtitle > score_fixed
+            else "fixed_score_higher"
+            if score_fixed > score_subtitle
+            else "score_tie_unknown"
+        )
+
+        if debug_scores:
+            print(
+                "classification_debug "
+                f"text='{det.get('text','')[:80]}' "
+                f"repeat_count={same_text_same_pos} "
+                f"score_subtitle={score_subtitle} "
+                f"score_fixed={score_fixed} "
+                f"is_subtitle={det['is_subtitle']} "
+                f"is_fixed={det['is_fixed_text']}",
+                flush=True,
+            )
 
     return detections
 
@@ -1540,6 +1573,10 @@ def build_testing_audit_rows(
             "start_time": det.get("start_time", 0),
             "end_time": det.get("end_time", 0),
             "confidence": det.get("confidence"),
+            "repeat_count": int(det.get("repeat_count", 0) or 0),
+            "score_subtitle": int(det.get("score_subtitle", 0) or 0),
+            "score_fixed": int(det.get("score_fixed", 0) or 0),
+            "decision_reason": det.get("decision_reason", "unknown"),
             "structural_classification": structural_classification(det),
             "semantic_tags": det.get("semantic_tags", []),
             "included_in_final_subtitles": is_in_filtered,
@@ -1601,7 +1638,7 @@ def analyze_video(request):
             raw_detections = extract_detections_from_raw_payload(source_payload)
             merged = merge_partial_sequences(raw_detections)
             inferred_duration = max((d.get("end_time", 0) for d in merged), default=0.0)
-            classified = classify_subtitle_vs_fixed(merged, inferred_duration)
+            classified = classify_subtitle_vs_fixed(merged, inferred_duration, debug_scores=True)
             classified = classify_semantic_tags(classified)
             classified = sorted(
                 classified,

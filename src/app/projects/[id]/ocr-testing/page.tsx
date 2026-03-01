@@ -28,6 +28,10 @@ interface OcrAuditRow {
   start_time: number;
   end_time: number;
   confidence?: number;
+  repeat_count?: number;
+  score_subtitle?: number;
+  score_fixed?: number;
+  decision_reason?: string;
   structural_classification: "subtitle" | "fixed" | "sequential" | "unknown";
   semantic_tags: string[];
   included_in_final_subtitles: boolean;
@@ -165,6 +169,10 @@ function buildFallbackAuditRows(payload: LegacyOcrTestResponse): OcrAuditRow[] {
       start_time: d.start_time ?? 0,
       end_time: d.end_time ?? 0,
       confidence: d.confidence,
+      repeat_count: 0,
+      score_subtitle: 0,
+      score_fixed: 0,
+      decision_reason: "legacy_fallback",
       structural_classification: fallbackStructuralClassification(d),
       semantic_tags: Array.isArray(d.semantic_tags) ? d.semantic_tags : [],
       included_in_final_subtitles: included,
@@ -212,6 +220,10 @@ function normalizeAndSortAuditRows(rows: OcrAuditRow[]): OcrAuditRow[] {
       order: index + 1,
       subtitle_filter_reason: normalizedReason,
       included_in_final_subtitles: normalizedIncluded,
+      repeat_count: row.repeat_count ?? 0,
+      score_subtitle: row.score_subtitle ?? 0,
+      score_fixed: row.score_fixed ?? 0,
+      decision_reason: row.decision_reason ?? "unknown",
       semantic_tags: Array.isArray(row.semantic_tags) ? row.semantic_tags : [],
       checked_in_spelling: checkedInSpelling,
       spelling_status: spellingStatus,
@@ -452,6 +464,7 @@ export default function OcrTestingPage() {
                       <th className="py-2 pr-4">Subtitle filter</th>
                       <th className="py-2 pr-4">Spelling</th>
                       <th className="py-2 pr-4">Spell API JSON</th>
+                      <th className="py-2 pr-4">Classifier debug</th>
                       <th className="py-2 pr-4">Time</th>
                       <th className="py-2 pr-4">Confidence</th>
                       <th className="py-2">Text</th>
@@ -491,6 +504,11 @@ export default function OcrTestingPage() {
                           ) : (
                             <span className="text-slate-500">-</span>
                           )}
+                        </td>
+                        <td className="py-2 pr-4 text-xs">
+                          <div>rep:{row.repeat_count ?? 0}</div>
+                          <div>sub:{row.score_subtitle ?? 0} fix:{row.score_fixed ?? 0}</div>
+                          <div className="text-[10px] text-slate-500">{row.decision_reason ?? "unknown"}</div>
                         </td>
                         <td className="py-2 pr-4 font-mono text-xs">
                           {formatTimecode(row.start_time)} - {formatTimecode(row.end_time)}
