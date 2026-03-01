@@ -5,6 +5,7 @@ import tarfile
 import time
 import traceback
 import uuid
+import json
 import subprocess
 import tempfile
 from difflib import SequenceMatcher
@@ -13,6 +14,7 @@ from urllib.parse import urlparse, parse_qs
 import functions_framework
 import requests
 from google.cloud import videointelligence_v1 as vi
+from google.protobuf.json_format import MessageToDict
 import google.generativeai as genai
 from supabase import create_client
 
@@ -499,6 +501,32 @@ def detect_text_in_video(video_path: str) -> list[dict]:
     )
     result = operation.result(timeout=600)
 
+    return extract_detections_from_vi_result(result)
+
+
+def detect_text_in_video_with_raw(video_path: str) -> tuple[list[dict], dict]:
+    """Detect text and return both flattened detections and raw VI payload."""
+    client = vi.VideoIntelligenceServiceClient()
+
+    with open(video_path, "rb") as f:
+        input_content = f.read()
+
+    features = [vi.Feature.TEXT_DETECTION]
+    operation = client.annotate_video(
+        request={"input_content": input_content, "features": features}
+    )
+    result = operation.result(timeout=600)
+    detections = extract_detections_from_vi_result(result)
+
+    raw_payload = MessageToDict(
+        result._pb,
+        preserving_proto_field_name=True,
+    ) if hasattr(result, "_pb") else {}
+
+    return detections, raw_payload
+
+
+def extract_detections_from_vi_result(result) -> list[dict]:
     detections = []
     for annotation in result.annotation_results:
         for text_annotation in annotation.text_annotations:
@@ -521,6 +549,91 @@ def detect_text_in_video(video_path: str) -> list[dict]:
                             "bottom": max(ys),
                             "right": max(xs),
                         }
+
+                detections.append({
+                    "text": text,
+                    "start_time": start,
+                    "end_time": end,
+                    "confidence": confidence,
+                    "bbox": bbox,
+                })
+    return detections
+
+
+def _parse_duration_seconds(value) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        raw = value[:-1] if value.endswith("s") else value
+        try:
+            return float(raw)
+        except ValueError:
+            return 0.0
+    if isinstance(value, dict):
+        seconds = value.get("seconds", 0)
+        nanos = value.get("nanos", 0)
+        try:
+            return float(seconds) + (float(nanos) / 1_000_000_000)
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def _to_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def extract_detections_from_raw_payload(raw_payload: dict) -> list[dict]:
+    detections: list[dict] = []
+    annotations = raw_payload.get("annotation_results", [])
+    if not isinstance(annotations, list):
+        return detections
+
+    for annotation in annotations:
+        if not isinstance(annotation, dict):
+            continue
+        text_annotations = annotation.get("text_annotations", [])
+        if not isinstance(text_annotations, list):
+            continue
+
+        for text_annotation in text_annotations:
+            if not isinstance(text_annotation, dict):
+                continue
+            text = read_string(text_annotation.get("text"))
+            if not text:
+                continue
+
+            segments = text_annotation.get("segments", [])
+            if not isinstance(segments, list):
+                continue
+
+            for segment in segments:
+                if not isinstance(segment, dict):
+                    continue
+                segment_range = segment.get("segment", {}) if isinstance(segment.get("segment"), dict) else {}
+                start = _parse_duration_seconds(segment_range.get("start_time_offset"))
+                end = _parse_duration_seconds(segment_range.get("end_time_offset"))
+                confidence = _to_float(segment.get("confidence"), 0.0)
+
+                bbox = {"top": 0.0, "left": 0.0, "bottom": 1.0, "right": 1.0}
+                frames = segment.get("frames", [])
+                if isinstance(frames, list) and frames:
+                    first_frame = frames[0] if isinstance(frames[0], dict) else {}
+                    rotated = first_frame.get("rotated_bounding_box", {}) if isinstance(first_frame.get("rotated_bounding_box"), dict) else {}
+                    vertices = rotated.get("vertices", [])
+                    if isinstance(vertices, list) and vertices:
+                        xs = [_to_float(v.get("x")) for v in vertices if isinstance(v, dict)]
+                        ys = [_to_float(v.get("y")) for v in vertices if isinstance(v, dict)]
+                        if xs and ys:
+                            bbox = {
+                                "top": min(ys),
+                                "left": min(xs),
+                                "bottom": max(ys),
+                                "right": max(xs),
+                            }
 
                 detections.append({
                     "text": text,
@@ -991,6 +1104,75 @@ def store_mismatches(supabase, project_id: str, mismatches: list[dict]):
         supabase.table("mismatches").insert(rows).execute()
 
 
+def save_ocr_raw_to_storage(project_id: str, video_url: str | None, raw_payload: dict) -> dict | None:
+    """Persist raw OCR payload to Supabase Storage as latest.json."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        print("Skipping OCR raw save: Supabase env missing", flush=True)
+        return None
+
+    generated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    object_path = f"projects/{project_id}/ocr-raw/latest.json"
+    raw_document = {
+        "version": 1,
+        "source": "google_video_intelligence",
+        "project_id": project_id,
+        "generated_at": generated_at,
+        "video_url": video_url,
+        "raw_response": raw_payload,
+    }
+
+    body = json.dumps(raw_document, ensure_ascii=False).encode("utf-8")
+    upload_url = f"{SUPABASE_URL}/storage/v1/object/ocr-raw/{object_path}"
+    response = requests.post(
+        upload_url,
+        headers={
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            "apikey": SUPABASE_SERVICE_KEY,
+            "x-upsert": "true",
+            "Content-Type": "application/json",
+        },
+        data=body,
+        timeout=60,
+    )
+
+    if response.status_code >= 400:
+        print(
+            f"Failed to upload OCR raw payload (status={response.status_code} body={response.text[:300]})",
+            flush=True,
+        )
+        return None
+
+    return {
+        "storage_path": object_path,
+        "generated_at": generated_at,
+        "size_bytes": len(body),
+    }
+
+
+def update_project_ocr_raw_metadata(supabase, project_id: str, raw_meta: dict):
+    if not raw_meta:
+        return
+    supabase.table("projects").update({
+        "ocr_raw_storage_path": raw_meta["storage_path"],
+        "ocr_raw_generated_at": raw_meta["generated_at"],
+        "ocr_raw_size_bytes": raw_meta["size_bytes"],
+    }).eq("id", project_id).execute()
+
+
+def build_filtered_subtitles(detections: list[dict]) -> list[dict]:
+    fixed_text_set = {
+        d["text"].strip().lower()
+        for d in detections
+        if d.get("is_fixed_text")
+    }
+    return [
+        d for d in detections
+        if d.get("is_subtitle")
+        and not d.get("is_partial_sequence")
+        and d["text"].strip().lower() not in fixed_text_set
+    ]
+
+
 # --- Main Cloud Function Entry Point ---
 @functions_framework.http
 def analyze_video(request):
@@ -1009,20 +1191,55 @@ def analyze_video(request):
     if not data:
         return {"error": "Missing request body"}, 400
 
+    mode = data.get("mode", "analyze")
     project_id = data.get("project_id")
     video_url = data.get("video_url")
     frame_io_url = data.get("frame_io_url")
+    raw_ocr_payload = data.get("raw_ocr_payload")
 
     print(f"project_id: {project_id}", flush=True)
+    print(f"mode: {mode}", flush=True)
     print(f"video_url:  {(video_url or '')[:120]}", flush=True)
     print(f"frame_io_url: {frame_io_url}", flush=True)
 
-    if not project_id:
+    if mode not in ("analyze", "classify_ocr_payload"):
+        return {"error": f"Unsupported mode: {mode}"}, 400
+
+    if mode == "analyze" and not project_id:
         return {"error": "Missing project_id"}, 400
+    if mode == "classify_ocr_payload" and not isinstance(raw_ocr_payload, dict):
+        return {"error": "Missing or invalid raw_ocr_payload", "error_code": "invalid_payload"}, 400
 
     supabase = get_supabase()
 
     try:
+        if mode == "classify_ocr_payload":
+            source_payload = raw_ocr_payload.get("raw_response") if isinstance(raw_ocr_payload.get("raw_response"), dict) else raw_ocr_payload
+            raw_detections = extract_detections_from_raw_payload(source_payload)
+            merged = merge_partial_sequences(raw_detections)
+            inferred_duration = max((d.get("end_time", 0) for d in merged), default=0.0)
+            classified = classify_subtitle_vs_fixed(merged, inferred_duration)
+            filtered_subtitles = build_filtered_subtitles(classified)
+
+            counts = {
+                "raw": len(raw_detections),
+                "merged": len(merged),
+                "subtitle": sum(1 for d in classified if d.get("is_subtitle")),
+                "fixed": sum(1 for d in classified if d.get("is_fixed_text")),
+                "partial": sum(1 for d in classified if d.get("is_partial_sequence")),
+                "filtered_subtitles": len(filtered_subtitles),
+            }
+
+            return {
+                "status": "ok",
+                "mode": "classify_ocr_payload",
+                "counts": counts,
+                "raw_response": source_payload,
+                "raw_detections": raw_detections,
+                "classified_detections": classified,
+                "filtered_subtitles": filtered_subtitles,
+            }, 200
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             if not video_url:
                 raise ValueError("No video URL available; resolve Frame.io metadata before triggering analysis")
@@ -1043,10 +1260,13 @@ def analyze_video(request):
             t2 = time.time()
             update_status(supabase, project_id, "detecting_text", 20,
                           "Sending video to Google Video Intelligence API...")
-            raw_detections = detect_text_in_video(video_path)
+            raw_detections, raw_payload = detect_text_in_video_with_raw(video_path)
             elapsed = time.time() - t2
             update_status(supabase, project_id, "detecting_text", 30,
                           f"Video Intelligence done: {len(raw_detections)} raw text detections in {elapsed:.1f}s")
+
+            raw_meta = save_ocr_raw_to_storage(project_id, video_url, raw_payload)
+            update_project_ocr_raw_metadata(supabase, project_id, raw_meta)
 
             merged = merge_partial_sequences(raw_detections)
             print(f"  Merged partial sequences: {len(raw_detections)} -> {len(merged)} detections", flush=True)

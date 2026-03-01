@@ -212,7 +212,12 @@ export default function VideoPreview({
         </div>
       </div>
 
-      <div className="vjs-container flex-1 min-h-0">
+      <div className="vjs-container flex-1 min-h-0 relative">
+        <div className="absolute top-3 right-3 z-20 pointer-events-none">
+          <span className="px-2 py-1 rounded-md bg-black/70 border border-white/10 text-[10px] font-mono text-white uppercase">
+            {formatTimecode(currentTime)}
+          </span>
+        </div>
         {videoUrl ? (
           <div className="h-full w-full bg-black rounded-2xl border border-slate-800 overflow-hidden">
             <div ref={videoContainerRef} className="h-full w-full" />

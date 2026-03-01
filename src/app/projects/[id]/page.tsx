@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
+import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import type { Project, TextDetection, Transcription, SpellingError, Mismatch } from "@/types/database";
 import { useRealtimeProgress } from "@/hooks/useRealtimeProgress";
@@ -247,6 +248,47 @@ export default function ProjectDetailPage() {
       {isProcessing && <ProcessingOverlay status={status} progress={progress} debugMessage={debugMessage} />}
 
       <main className="p-6 max-w-[1600px] mx-auto pb-24 w-full">
+        <div className="mb-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+          <div>
+            <h1 className="text-2xl md:text-3xl font-display font-bold text-slate-900 dark:text-white">
+              {project.name}
+            </h1>
+            <p className="text-xs text-slate-500 mt-1">
+              Project ID: <span className="font-mono">{project.id}</span>
+            </p>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <Link
+              href={`/projects/${project.id}/ocr-testing`}
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            >
+              <span className="material-symbols-outlined text-base">science</span>
+              OCR Testing
+            </Link>
+
+            {project.ocr_raw_storage_path ? (
+              <a
+                href={`/api/projects/${project.id}/ocr-raw/download`}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+              >
+                <span className="material-symbols-outlined text-base">download</span>
+                Download RAW OCR
+              </a>
+            ) : (
+              <button
+                type="button"
+                disabled
+                title="RAW OCR not available yet. Run analysis first."
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-medium text-slate-400 cursor-not-allowed"
+              >
+                <span className="material-symbols-outlined text-base">download</span>
+                Download RAW OCR
+              </button>
+            )}
+          </div>
+        </div>
+
         {analysisError && (
           <div className="mb-4 text-sm text-rose-400 bg-rose-500/10 border border-rose-500/30 rounded-xl px-4 py-3">
             {analysisError}

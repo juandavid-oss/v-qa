@@ -22,6 +22,9 @@ export interface Project {
   status: ProjectStatus;
   progress: number;
   error_message: string | null;
+  ocr_raw_storage_path?: string | null;
+  ocr_raw_generated_at?: string | null;
+  ocr_raw_size_bytes?: number | null;
   created_at: string;
   updated_at: string;
 }
