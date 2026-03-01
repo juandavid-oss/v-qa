@@ -19,6 +19,8 @@ export default function Navbar({
   onAnalyze,
 }: NavbarProps) {
   const [user, setUser] = useState<User | null>(null);
+  const [theme, setTheme] = useState<"light" | "dark">("dark");
+  const [themeReady, setThemeReady] = useState(false);
   const [url, setUrl] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const router = useRouter();
@@ -31,6 +33,15 @@ export default function Navbar({
   useEffect(() => {
     setUrl(initialUrl);
   }, [initialUrl]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem("theme");
+    const initialTheme = stored === "light" ? "light" : "dark";
+    setTheme(initialTheme);
+    document.documentElement.classList.toggle("dark", initialTheme === "dark");
+    setThemeReady(true);
+  }, []);
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
@@ -51,6 +62,15 @@ export default function Navbar({
   };
 
   const analyzeDisabled = !onAnalyze || !url.trim() || submitting || analyzing;
+
+  const handleToggleTheme = () => {
+    const nextTheme: "light" | "dark" = theme === "dark" ? "light" : "dark";
+    setTheme(nextTheme);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("theme", nextTheme);
+      document.documentElement.classList.toggle("dark", nextTheme === "dark");
+    }
+  };
 
   return (
     <nav className="border-b border-slate-200 dark:border-slate-800 bg-surface-light dark:bg-surface-dark px-6 py-4 flex items-center justify-between sticky top-0 z-50">
@@ -97,6 +117,25 @@ export default function Navbar({
       </div>
 
       <div className="flex items-center gap-4 ml-6">
+        <button
+          type="button"
+          onClick={handleToggleTheme}
+          disabled={!themeReady}
+          aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+          className="group relative inline-flex items-center gap-2 h-10 px-2.5 rounded-full border border-slate-200 dark:border-slate-700 bg-slate-100/80 dark:bg-slate-900/60 backdrop-blur-md shadow-sm hover:shadow-md transition-all disabled:opacity-70 disabled:cursor-not-allowed"
+        >
+          <span className={`material-symbols-outlined text-[17px] transition-colors ${theme === "light" ? "text-amber-500" : "text-slate-400"}`}>
+            light_mode
+          </span>
+          <span className={`material-symbols-outlined text-[17px] transition-colors ${theme === "dark" ? "text-indigo-400" : "text-slate-400"}`}>
+            dark_mode
+          </span>
+          <span
+            className={`absolute top-1 h-8 w-8 rounded-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm transition-all ${
+              theme === "dark" ? "left-[38px]" : "left-1"
+            }`}
+          />
+        </button>
         <div className="relative group">
           <div className="h-10 w-10 rounded-full bg-gradient-to-tr from-primary to-accent-purple p-[2px] cursor-pointer">
             <div className="h-full w-full rounded-full bg-white dark:bg-slate-900 flex items-center justify-center text-sm font-bold text-primary">
