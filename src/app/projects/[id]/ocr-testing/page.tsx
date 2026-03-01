@@ -125,7 +125,7 @@ function buildFallbackAuditRows(payload: LegacyOcrTestResponse): OcrAuditRow[] {
     const confidentEnough = hasEnoughSubtitleConfidence(d);
     const includedByRules = Boolean(d.is_subtitle) && !Boolean(d.is_partial_sequence) && confidentEnough;
     const included = filteredSet.size > 0 ? filteredSet.has(getDetectionKey(d)) : includedByRules;
-    const checkedInSpelling = Boolean(d.is_subtitle) && !Boolean(d.is_partial_sequence);
+    const checkedInSpelling = included;
     const subtitleFilterReason = d.is_partial_sequence
       ? "excluded_partial_sequence"
       : !d.is_subtitle
@@ -170,8 +170,7 @@ function normalizeAndSortAuditRows(rows: OcrAuditRow[]): OcrAuditRow[] {
     const inferredChecked =
       typeof row.checked_in_spelling === "boolean"
         ? row.checked_in_spelling
-        : row.structural_classification === "subtitle" &&
-          row.subtitle_filter_reason !== "excluded_partial_sequence";
+        : row.subtitle_filter_reason === "included_in_final_subtitles";
 
     let spellingStatus = row.spelling_status;
     if (spellingStatus === "not_checked" && inferredChecked) {

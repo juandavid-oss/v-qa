@@ -74,6 +74,7 @@ VIDEO_EXT_RE = re.compile(r"\.(mp4|mov|m4v|webm|avi|mkv|mxf)(\?|$)", re.IGNORECA
 IMAGE_EXT_RE = re.compile(r"\.(jpg|jpeg|png|webp|gif|svg|avif)(\?|$)", re.IGNORECASE)
 POSITIVE_URL_HINTS = ("video", "download", "source", "original", "proxy", "stream", "transcode", "playback")
 NEGATIVE_URL_HINTS = ("thumbnail", "thumb", "poster", "sprite", "waveform", "image")
+WORD_TOKEN_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'\-’]*")
 
 
 def get_supabase():
@@ -877,44 +878,89 @@ def is_gemini_model_unavailable_error(message: str) -> bool:
 
 
 # --- 6. Spelling & Grammar Check (LanguageTool) ---
+def _extract_spellcheck_tokens(text: str) -> list[tuple[str, int, int]]:
+    tokens: list[tuple[str, int, int]] = []
+    for match in WORD_TOKEN_RE.finditer(text or ""):
+        token = match.group(0)
+        # Skip ultra-short tokens that are commonly noise.
+        if len(token) < 2:
+            continue
+        tokens.append((token, match.start(), match.end()))
+    return tokens
+
+
+def _is_typo_match(match: dict) -> bool:
+    rule = match.get("rule", {}) if isinstance(match.get("rule"), dict) else {}
+    rule_id = read_string(rule.get("id")).upper()
+    issue_type = read_string(rule.get("issueType")).lower()
+    category = rule.get("category", {}) if isinstance(rule.get("category"), dict) else {}
+    category_id = read_string(category.get("id")).upper()
+    category_name = read_string(category.get("name")).upper()
+
+    if issue_type in {"misspelling", "typographical", "typo"}:
+        return True
+    if "TYPO" in category_id or "TYPO" in category_name:
+        return True
+    if "MORFOLOGIK" in rule_id or "HUNSPELL" in rule_id or "SPELLER" in rule_id:
+        return True
+    return False
+
+
 def check_spelling(texts: list[dict]) -> list[dict]:
-    """Check spelling/grammar using LanguageTool API."""
+    """Check per-word typos using LanguageTool API."""
     errors = []
+    token_cache: dict[str, list[dict]] = {}
 
     for item in texts:
         text = item["text"]
         timestamp = item.get("start_time", 0)
         detection_id = item.get("detection_id")
-
-        response = requests.post(
-            LANGUAGETOOL_URL,
-            data={"text": text, "language": "auto"},
-            timeout=30,
-        )
-        if response.status_code != 200:
+        token_spans = _extract_spellcheck_tokens(text)
+        if not token_spans:
             continue
 
-        result = response.json()
-        for match in result.get("matches", []):
-            replacements = match.get("replacements", [])
-            original = text[match["offset"]:match["offset"] + match["length"]]
-            suggested = replacements[0]["value"] if replacements else original
+        for token, token_start, token_end in token_spans:
+            cache_key = token.casefold()
+            matches = token_cache.get(cache_key)
 
-            # Build context
-            start = max(0, match["offset"] - 20)
-            end = min(len(text), match["offset"] + match["length"] + 20)
-            context = text[start:end]
+            if matches is None:
+                response = requests.post(
+                    LANGUAGETOOL_URL,
+                    data={"text": token, "language": "auto"},
+                    timeout=30,
+                )
+                if response.status_code != 200:
+                    token_cache[cache_key] = []
+                    continue
 
-            errors.append({
-                "original_text": original,
-                "suggested_text": suggested,
-                "context": context,
-                "timestamp": timestamp,
-                "detection_id": detection_id,
-                "rule_id": match.get("rule", {}).get("id", ""),
-                "source": "subtitle",
-                "has_replacement": bool(replacements),
-            })
+                result = response.json()
+                matches = [
+                    m for m in result.get("matches", [])
+                    if isinstance(m, dict) and _is_typo_match(m)
+                ]
+                token_cache[cache_key] = matches
+
+            if not matches:
+                continue
+
+            # Build context around the token in the original subtitle segment.
+            context_start = max(0, token_start - 20)
+            context_end = min(len(text), token_end + 20)
+            context = text[context_start:context_end]
+
+            for match in matches:
+                replacements = match.get("replacements", [])
+                suggested = replacements[0]["value"] if replacements else token
+                errors.append({
+                    "original_text": token,
+                    "suggested_text": suggested,
+                    "context": context,
+                    "timestamp": timestamp,
+                    "detection_id": detection_id,
+                    "rule_id": match.get("rule", {}).get("id", ""),
+                    "source": "subtitle",
+                    "has_replacement": bool(replacements),
+                })
 
     return errors
 
@@ -1393,8 +1439,7 @@ def analyze_video(request):
                     "text": d["text"],
                     "start_time": d["start_time"],
                 }
-                for d in classified
-                if d.get("is_subtitle") and not d.get("is_partial_sequence")
+                for d in filtered_subtitles
             ]
             spellcheck_checked_ids = {d["detection_id"] for d in spelling_input}
             raw_spelling_errors = check_spelling(spelling_input)
@@ -1513,8 +1558,7 @@ def analyze_video(request):
             t4 = time.time()
             subtitle_texts = [
                 {"text": d["text"], "start_time": d["start_time"]}
-                for d in classified
-                if d.get("is_subtitle") and not d.get("is_partial_sequence")
+                for d in build_filtered_subtitles(classified)
             ]
             update_status(supabase, project_id, "checking_spelling", 70,
                           f"Checking spelling on {len(subtitle_texts)} subtitle segments...")
