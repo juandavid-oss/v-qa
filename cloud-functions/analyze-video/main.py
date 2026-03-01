@@ -1056,11 +1056,18 @@ def check_spelling(
     if not SPELLCHECK_API_KEY:
         raise ValueError("SPELLCHECK_API_KEY is not configured")
 
+    import re
+
     for item in texts:
-        text = item["text"]
+        raw_text = item["text"]
         timestamp = item.get("start_time", 0)
         detection_id = item.get("detection_id")
-        if not text or not text.strip():
+        if not raw_text or not raw_text.strip():
+            continue
+
+        # Strip punctuation and exclamation/question marks before sending to API
+        text = re.sub(r"[^\w\s]", "", raw_text).strip()
+        if not text:
             continue
 
         response = requests.get(
@@ -1111,7 +1118,7 @@ def check_spelling(
             errors.append({
                 "original_text": original_word,
                 "suggested_text": suggested,
-                "context": text,
+                "context": raw_text,
                 "timestamp": timestamp,
                 "detection_id": detection_id,
                 "rule_id": "API_NINJAS_SPELLCHECK",
@@ -1154,18 +1161,45 @@ def filter_false_positives(errors: list[dict], detections: list[dict]) -> list[d
 
 
 # --- 7. Mismatch Detection ---
+
+_NUMBER_WORDS = {
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+    "ten": "10", "eleven": "11", "twelve": "12", "thirteen": "13",
+    "fourteen": "14", "fifteen": "15", "sixteen": "16", "seventeen": "17",
+    "eighteen": "18", "nineteen": "19", "twenty": "20", "twenties": "20s",
+    "thirty": "30", "thirties": "30s", "forty": "40", "forties": "40s",
+    "fifty": "50", "fifties": "50s", "sixty": "60", "seventy": "70",
+    "eighty": "80", "ninety": "90", "hundred": "100", "thousand": "1000",
+}
+
+
+def _normalize_for_comparison(text: str) -> str:
+    """Normalize text: lowercase, strip punctuation, unify numbers, collapse whitespace."""
+    t = text.lower().strip()
+    # Strip ALL punctuation, exclamation/question marks, periods, commas, apostrophes, etc.
+    t = re.sub(r"[^\w\s]", "", t)
+    # Normalize number words to digits
+    for word, digit in _NUMBER_WORDS.items():
+        t = re.sub(r"\b" + re.escape(word) + r"\b", digit, t)
+    # Collapse multiple spaces/tabs into single space
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+OVERLAP_TOLERANCE = 1.5
+
+
 def detect_mismatches(subtitles: list[dict], transcriptions: list[dict]) -> list[dict]:
-    """Compare subtitles against audio transcription to find mismatches."""
+    """Compare filtered subtitles against audio transcription to find mismatches."""
     mismatches = []
 
     for sub in subtitles:
-        if not sub.get("is_subtitle"):
-            continue
-
-        # Find overlapping transcription segments
+        # Find overlapping transcription segments (with 1.5s tolerance)
         overlapping = [
             t for t in transcriptions
-            if t["start_time"] < sub["end_time"] and t["end_time"] > sub["start_time"]
+            if t["start_time"] < (sub["end_time"] + OVERLAP_TOLERANCE)
+            and t["end_time"] > (sub["start_time"] - OVERLAP_TOLERANCE)
         ]
 
         if not overlapping:
@@ -1181,11 +1215,10 @@ def detect_mismatches(subtitles: list[dict], transcriptions: list[dict]) -> list
 
         combined_transcript = " ".join(t["text"] for t in overlapping)
 
-        ratio = SequenceMatcher(
-            None,
-            sub["text"].lower().strip(),
-            combined_transcript.lower().strip(),
-        ).ratio()
+        norm_sub = _normalize_for_comparison(sub["text"])
+        norm_trans = _normalize_for_comparison(combined_transcript)
+
+        ratio = SequenceMatcher(None, norm_sub, norm_trans).ratio()
 
         if ratio < 0.85:
             severity = "high" if ratio < 0.5 else "medium" if ratio < 0.75 else "low"
@@ -1202,8 +1235,8 @@ def detect_mismatches(subtitles: list[dict], transcriptions: list[dict]) -> list
 
 
 def _classify_mismatch(subtitle: str, transcript: str) -> str:
-    sub_words = set(subtitle.lower().split())
-    trans_words = set(transcript.lower().split())
+    sub_words = set(_normalize_for_comparison(subtitle).split())
+    trans_words = set(_normalize_for_comparison(transcript).split())
 
     missing = sub_words - trans_words
     extra = trans_words - sub_words
@@ -1720,7 +1753,8 @@ def analyze_video(request):
             t5 = time.time()
             update_status(supabase, project_id, "detecting_mismatches", 85,
                           "Comparing subtitles against transcription...")
-            mismatches = detect_mismatches(classified, transcription_segments)
+            filtered_subs = build_filtered_subtitles(classified)
+            mismatches = detect_mismatches(filtered_subs, transcription_segments)
             store_mismatches(supabase, project_id, mismatches)
             elapsed = time.time() - t5
             update_status(supabase, project_id, "detecting_mismatches", 95,

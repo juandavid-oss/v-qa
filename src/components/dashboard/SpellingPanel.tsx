@@ -14,10 +14,10 @@ export default function SpellingPanel({ errors }: SpellingPanelProps) {
     <div className="bg-surface-light dark:bg-surface-dark rounded-2xl border border-slate-200 dark:border-slate-800 p-6">
       <div className="flex items-center justify-between mb-6">
         <h3 className="font-display font-bold text-lg flex items-center gap-2">
-          <span className="material-symbols-outlined text-rose-500">spellcheck</span>
+          <span className="material-symbols-outlined text-amber-500">spellcheck</span>
           Spelling &amp; Grammar
         </h3>
-        <span className="text-xs bg-rose-500/10 text-rose-500 px-3 py-1 rounded-full font-bold">
+        <span className="text-xs bg-amber-500/10 text-amber-500 px-3 py-1 rounded-full font-bold">
           {activeErrors.length} {activeErrors.length === 1 ? "Issue" : "Issues"} Found
         </span>
       </div>
