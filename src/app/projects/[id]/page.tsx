@@ -314,25 +314,6 @@ export default function ProjectDetailPage() {
               OCR Testing
             </Link>
 
-            {project.ocr_raw_storage_path ? (
-              <a
-                href={`/api/projects/${project.id}/ocr-raw/download`}
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-              >
-                <span className="material-symbols-outlined text-base">download</span>
-                Download RAW OCR
-              </a>
-            ) : (
-              <button
-                type="button"
-                disabled
-                title="RAW OCR not available yet. Run analysis first."
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-medium text-slate-400 cursor-not-allowed"
-              >
-                <span className="material-symbols-outlined text-base">download</span>
-                Download RAW OCR
-              </button>
-            )}
           </div>
         </div>
 
