@@ -118,6 +118,7 @@ function buildFallbackAuditRows(payload: LegacyOcrTestResponse): OcrAuditRow[] {
 
   return classified.map((d, index) => {
     const included = filteredSet.has(getDetectionKey(d));
+    const checkedInSpelling = Boolean(d.is_subtitle) && !Boolean(d.is_partial_sequence);
     const subtitleFilterReason = d.is_partial_sequence
       ? "excluded_partial_sequence"
       : !d.is_subtitle
@@ -136,9 +137,9 @@ function buildFallbackAuditRows(payload: LegacyOcrTestResponse): OcrAuditRow[] {
       structural_classification: fallbackStructuralClassification(d),
       semantic_tags: Array.isArray(d.semantic_tags) ? d.semantic_tags : [],
       included_in_final_subtitles: included,
-      checked_in_spelling: false,
+      checked_in_spelling: checkedInSpelling,
       subtitle_filter_reason: subtitleFilterReason,
-      spelling_status: "not_checked",
+      spelling_status: checkedInSpelling ? "no_error" : "not_checked",
       spelling_raw_match_count: 0,
       spelling_kept_match_count: 0,
       spelling_raw_matches: [],
@@ -147,12 +148,52 @@ function buildFallbackAuditRows(payload: LegacyOcrTestResponse): OcrAuditRow[] {
   });
 }
 
+function normalizeAndSortAuditRows(rows: OcrAuditRow[]): OcrAuditRow[] {
+  const sorted = [...rows].sort((a, b) => {
+    const byStart = (a.start_time ?? 0) - (b.start_time ?? 0);
+    if (byStart !== 0) return byStart;
+    const byEnd = (a.end_time ?? 0) - (b.end_time ?? 0);
+    if (byEnd !== 0) return byEnd;
+    return (a.text ?? "").localeCompare(b.text ?? "");
+  });
+
+  return sorted.map((row, index) => {
+    const inferredChecked =
+      typeof row.checked_in_spelling === "boolean"
+        ? row.checked_in_spelling
+        : row.structural_classification === "subtitle" &&
+          row.subtitle_filter_reason !== "excluded_partial_sequence";
+
+    let spellingStatus = row.spelling_status;
+    if (spellingStatus === "not_checked" && inferredChecked) {
+      if ((row.spelling_raw_match_count ?? 0) > 0) {
+        spellingStatus = (row.spelling_kept_match_count ?? 0) > 0 ? "error_detected" : "error_filtered_out";
+      } else {
+        spellingStatus = "no_error";
+      }
+    }
+
+    return {
+      ...row,
+      order: index + 1,
+      semantic_tags: Array.isArray(row.semantic_tags) ? row.semantic_tags : [],
+      checked_in_spelling: inferredChecked,
+      spelling_status: spellingStatus,
+      spelling_raw_match_count: row.spelling_raw_match_count ?? 0,
+      spelling_kept_match_count: row.spelling_kept_match_count ?? 0,
+      spelling_raw_matches: Array.isArray(row.spelling_raw_matches) ? row.spelling_raw_matches : [],
+      spelling_kept_matches: Array.isArray(row.spelling_kept_matches) ? row.spelling_kept_matches : [],
+    };
+  });
+}
+
 function normalizeOcrTestResponse(payload: LegacyOcrTestResponse): OcrTestResponse {
   const rawDetections = Array.isArray(payload.raw_detections) ? payload.raw_detections : [];
-  const auditRows =
+  const auditRowsBase =
     Array.isArray(payload.audit_rows) && payload.audit_rows.length > 0
       ? payload.audit_rows
       : buildFallbackAuditRows(payload);
+  const auditRows = normalizeAndSortAuditRows(auditRowsBase);
 
   return {
     status: payload.status ?? "ok",

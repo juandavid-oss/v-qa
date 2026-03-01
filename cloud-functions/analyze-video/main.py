@@ -1368,6 +1368,14 @@ def analyze_video(request):
             inferred_duration = max((d.get("end_time", 0) for d in merged), default=0.0)
             classified = classify_subtitle_vs_fixed(merged, inferred_duration)
             classified = classify_semantic_tags(classified)
+            classified = sorted(
+                classified,
+                key=lambda d: (
+                    d.get("start_time", 0),
+                    d.get("end_time", 0),
+                    (d.get("text") or "").lower(),
+                ),
+            )
 
             for index, det in enumerate(classified):
                 det["detection_id"] = f"det_{index:04d}"
