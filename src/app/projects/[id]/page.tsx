@@ -118,7 +118,15 @@ export default function ProjectDetailPage() {
       .eq("project_id", projectId)
       .order("start_time");
 
-    if (mm) setMismatches(mm as Mismatch[]);
+    if (mm) {
+      const allowedMismatches = (mm as Mismatch[]).filter((mismatch) => {
+        if (subtitleWindows.length === 0) return true;
+        return subtitleWindows.some(
+          (w) => mismatch.start_time <= (w.end + 0.25) && mismatch.end_time >= (w.start - 0.25),
+        );
+      });
+      setMismatches(allowedMismatches);
+    }
 
     setLoading(false);
   }, [projectId, supabase, setStatus, setProgress]);

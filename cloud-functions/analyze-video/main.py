@@ -1150,6 +1150,10 @@ def filter_false_positives(errors: list[dict], detections: list[dict]) -> list[d
         original_lower = original.lower()
         has_replacement = bool(error.get("has_replacement", True))
 
+        # Skip non-actionable matches (same token after normalization).
+        if not has_replacement:
+            continue
+
         # Skip if it's a brand name
         if original_lower in brand_names:
             continue
@@ -1300,6 +1304,9 @@ def store_transcriptions(supabase, project_id: str, segments: list[dict]):
 def store_spelling_errors(supabase, project_id: str, errors: list[dict]):
     rows = []
     for e in errors:
+        # Defensive gate: do not persist non-actionable punctuation/case-only matches.
+        if not bool(e.get("has_replacement", True)):
+            continue
         rows.append({
             "id": str(uuid.uuid4()),
             "project_id": project_id,
