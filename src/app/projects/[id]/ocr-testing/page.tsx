@@ -120,11 +120,24 @@ function buildFallbackAuditRows(payload: LegacyOcrTestResponse): OcrAuditRow[] {
   const classified = Array.isArray(payload.classified_detections) ? payload.classified_detections : [];
   const filtered = Array.isArray(payload.filtered_subtitles) ? payload.filtered_subtitles : [];
   const filteredSet = new Set(filtered.map(getDetectionKey));
+  const fixedTextSet = new Set(
+    classified
+      .filter((d) => Boolean(d.is_fixed_text))
+      .map((d) => (d.text ?? "").trim().toLowerCase())
+      .filter((text) => text.length > 0)
+  );
 
   return classified.map((d, index) => {
     const confidentEnough = hasEnoughSubtitleConfidence(d);
-    const includedByRules = Boolean(d.is_subtitle) && !Boolean(d.is_partial_sequence) && confidentEnough;
-    const included = filteredSet.size > 0 ? filteredSet.has(getDetectionKey(d)) : includedByRules;
+    const normalizedText = (d.text ?? "").trim().toLowerCase();
+    const matchesFixedText = normalizedText.length > 0 && fixedTextSet.has(normalizedText);
+    const includedByRules =
+      Boolean(d.is_subtitle) &&
+      !Boolean(d.is_partial_sequence) &&
+      confidentEnough &&
+      !matchesFixedText;
+    const included =
+      filteredSet.size > 0 ? filteredSet.has(getDetectionKey(d)) && includedByRules : includedByRules;
     const checkedInSpelling = included;
     const subtitleFilterReason = d.is_partial_sequence
       ? "excluded_partial_sequence"
@@ -132,7 +145,9 @@ function buildFallbackAuditRows(payload: LegacyOcrTestResponse): OcrAuditRow[] {
         ? "excluded_not_subtitle"
         : !confidentEnough
           ? "excluded_low_confidence"
-        : included
+          : matchesFixedText
+            ? "excluded_matches_fixed_text"
+        : includedByRules
           ? "included_in_final_subtitles"
           : "excluded_matches_fixed_text";
 
@@ -167,13 +182,13 @@ function normalizeAndSortAuditRows(rows: OcrAuditRow[]): OcrAuditRow[] {
   });
 
   return sorted.map((row, index) => {
-    const inferredChecked =
-      typeof row.checked_in_spelling === "boolean"
-        ? row.checked_in_spelling
-        : row.subtitle_filter_reason === "included_in_final_subtitles";
+    const normalizedIncluded = row.subtitle_filter_reason === "included_in_final_subtitles";
+    const checkedInSpelling = normalizedIncluded;
 
     let spellingStatus = row.spelling_status;
-    if (spellingStatus === "not_checked" && inferredChecked) {
+    if (!checkedInSpelling) {
+      spellingStatus = "not_checked";
+    } else if (spellingStatus === "not_checked") {
       if ((row.spelling_raw_match_count ?? 0) > 0) {
         spellingStatus = (row.spelling_kept_match_count ?? 0) > 0 ? "error_detected" : "error_filtered_out";
       } else {
@@ -184,8 +199,9 @@ function normalizeAndSortAuditRows(rows: OcrAuditRow[]): OcrAuditRow[] {
     return {
       ...row,
       order: index + 1,
+      included_in_final_subtitles: normalizedIncluded,
       semantic_tags: Array.isArray(row.semantic_tags) ? row.semantic_tags : [],
-      checked_in_spelling: inferredChecked,
+      checked_in_spelling: checkedInSpelling,
       spelling_status: spellingStatus,
       spelling_raw_match_count: row.spelling_raw_match_count ?? 0,
       spelling_kept_match_count: row.spelling_kept_match_count ?? 0,
