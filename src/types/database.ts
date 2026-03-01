@@ -9,6 +9,8 @@ export type ProjectStatus =
   | "error";
 
 export type MismatchSeverity = "low" | "medium" | "high";
+export type TextDetectionCategory = "partial_sequence" | "fixed_text" | "subtitle_text";
+export type TextSemanticTag = "proper_name" | "brand_name";
 
 export interface Project {
   id: string;
@@ -40,6 +42,12 @@ export interface TextDetection {
   is_subtitle: boolean;
   is_fixed_text: boolean;
   is_partial_sequence: boolean;
+  category?: TextDetectionCategory | null;
+  semantic_tags?: TextSemanticTag[] | null;
+  canonical_text?: string | null;
+  variation_group_id?: string | null;
+  variation_similarity?: number | null;
+  is_name_or_brand?: boolean;
   merged_text_id: string | null;
   created_at: string;
 }

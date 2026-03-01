@@ -7,6 +7,7 @@ import traceback
 import uuid
 import subprocess
 import tempfile
+import unicodedata
 from difflib import SequenceMatcher
 from urllib.parse import urlparse, parse_qs
 
@@ -58,6 +59,33 @@ LANGUAGETOOL_URL = os.environ.get("LANGUAGETOOL_URL", "https://api.languagetool.
 CLOUD_FUNCTION_SECRET = os.environ.get("CLOUD_FUNCTION_SECRET")
 FRAME_IO_TOKEN = os.environ.get("FRAME_IO_TOKEN") or os.environ.get("FRAME_IO_V4_TOKEN")
 FRAME_IO_V4_API = "https://api.frame.io/v4"
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+LEVENSHTEIN_THRESHOLD = _env_float("LEVENSHTEIN_THRESHOLD", 0.88)
+MIN_LEN_FOR_FUZZY = _env_int("MIN_LEN_FOR_FUZZY", 4)
+BRAND_WHITELIST_RAW = os.environ.get("BRAND_WHITELIST", "")
+PROPER_NAME_WHITELIST_RAW = os.environ.get("PROPER_NAME_WHITELIST", "")
+
 FRAME_MEDIA_LINK_INCLUDES = ",".join((
     "media_links.original",
     "media_links.thumbnail",
@@ -667,6 +695,273 @@ def classify_subtitle_vs_fixed(detections: list[dict], video_duration: float) ->
     return detections
 
 
+# --- 4.1 Text Variations + Semantic Classification ---
+def normalize_text_for_similarity(text: str | None) -> str:
+    if not isinstance(text, str):
+        return ""
+    value = unicodedata.normalize("NFKD", text)
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    value = value.lower().strip()
+    value = re.sub(r"[^a-z0-9\s]", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def parse_whitelist(raw: str) -> set[str]:
+    return {
+        normalize_text_for_similarity(token)
+        for token in re.split(r"[,\n;]", raw)
+        if normalize_text_for_similarity(token)
+    }
+
+
+def levenshtein_distance(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    if len(a) < len(b):
+        a, b = b, a
+
+    prev_row = list(range(len(b) + 1))
+    for i, char_a in enumerate(a, start=1):
+        curr_row = [i]
+        for j, char_b in enumerate(b, start=1):
+            cost = 0 if char_a == char_b else 1
+            curr_row.append(min(
+                curr_row[-1] + 1,     # insertion
+                prev_row[j] + 1,      # deletion
+                prev_row[j - 1] + cost,  # substitution
+            ))
+        prev_row = curr_row
+
+    return prev_row[-1]
+
+
+def levenshtein_similarity(a: str, b: str) -> float:
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+
+    distance = levenshtein_distance(a, b)
+    return 1.0 - (distance / max(len(a), len(b)))
+
+
+def should_exact_match_only(normalized_text: str) -> bool:
+    return len(normalized_text) < MIN_LEN_FOR_FUZZY or normalized_text.isdigit()
+
+
+def should_group_variation(a: str, b: str, threshold: float) -> bool:
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if should_exact_match_only(a) or should_exact_match_only(b):
+        return False
+    return levenshtein_similarity(a, b) >= threshold
+
+
+def _find(parent: list[int], idx: int) -> int:
+    while parent[idx] != idx:
+        parent[idx] = parent[parent[idx]]
+        idx = parent[idx]
+    return idx
+
+
+def _union(parent: list[int], rank: list[int], a: int, b: int):
+    root_a = _find(parent, a)
+    root_b = _find(parent, b)
+    if root_a == root_b:
+        return
+    if rank[root_a] < rank[root_b]:
+        parent[root_a] = root_b
+    elif rank[root_a] > rank[root_b]:
+        parent[root_b] = root_a
+    else:
+        parent[root_b] = root_a
+        rank[root_a] += 1
+
+
+def choose_structural_category(det: dict) -> str:
+    if det.get("is_partial_sequence"):
+        return "partial_sequence"
+    if det.get("is_fixed_text") and not det.get("is_subtitle"):
+        return "fixed_text"
+    if det.get("is_subtitle") and not det.get("is_fixed_text"):
+        return "subtitle_text"
+    if det.get("is_fixed_text"):
+        return "fixed_text"
+    return "subtitle_text"
+
+
+def set_structural_category_fields(detections: list[dict]) -> list[dict]:
+    for det in detections:
+        category = choose_structural_category(det)
+        det["category"] = category
+        det["is_partial_sequence"] = category == "partial_sequence"
+        det["is_fixed_text"] = category == "fixed_text"
+        det["is_subtitle"] = category == "subtitle_text"
+    return detections
+
+
+def assign_text_variation_groups(detections: list[dict], threshold: float) -> list[dict]:
+    if not detections:
+        return detections
+
+    normalized_texts = [normalize_text_for_similarity(d.get("text")) for d in detections]
+    count = len(detections)
+    parent = list(range(count))
+    rank = [0] * count
+
+    for i in range(count):
+        for j in range(i + 1, count):
+            if should_group_variation(normalized_texts[i], normalized_texts[j], threshold):
+                _union(parent, rank, i, j)
+
+    components: dict[int, list[int]] = {}
+    for idx in range(count):
+        root = _find(parent, idx)
+        components.setdefault(root, []).append(idx)
+
+    for indices in components.values():
+        group_id = str(uuid.uuid4())
+        stats: dict[str, dict] = {}
+
+        for idx in indices:
+            norm = normalized_texts[idx]
+            raw_text = (detections[idx].get("text") or "").strip()
+            if not norm:
+                continue
+
+            if norm not in stats:
+                stats[norm] = {
+                    "count": 0,
+                    "confidence_sum": 0.0,
+                    "best_text": raw_text,
+                }
+
+            stats[norm]["count"] += 1
+            confidence = detections[idx].get("confidence")
+            if isinstance(confidence, (float, int)):
+                stats[norm]["confidence_sum"] += float(confidence)
+
+            if len(raw_text) > len(stats[norm]["best_text"]):
+                stats[norm]["best_text"] = raw_text
+
+        if stats:
+            canonical_norm = max(
+                stats,
+                key=lambda key: (
+                    stats[key]["count"],
+                    (stats[key]["confidence_sum"] / stats[key]["count"]) if stats[key]["count"] else 0.0,
+                    len(stats[key]["best_text"]),
+                ),
+            )
+            canonical_text = stats[canonical_norm]["best_text"] or detections[indices[0]].get("text", "")
+        else:
+            canonical_text = (detections[indices[0]].get("text") or "").strip()
+            canonical_norm = normalize_text_for_similarity(canonical_text)
+
+        for idx in indices:
+            det = detections[idx]
+            det["variation_group_id"] = group_id
+            det["canonical_text"] = canonical_text or None
+
+            norm = normalized_texts[idx]
+            if norm and canonical_norm:
+                det["variation_similarity"] = round(levenshtein_similarity(norm, canonical_norm), 4)
+            else:
+                det["variation_similarity"] = None
+
+    return detections
+
+
+def _average_spatial_overlap(group: list[dict]) -> float:
+    if len(group) < 2:
+        return 0.0
+    total = 0.0
+    pairs = 0
+    for i in range(len(group)):
+        for j in range(i + 1, len(group)):
+            total += bbox_overlap(group[i]["bbox"], group[j]["bbox"])
+            pairs += 1
+    return total / pairs if pairs else 0.0
+
+
+def _looks_like_proper_name(text: str) -> bool:
+    tokens = re.findall(r"[A-Za-z][A-Za-z'\-]*", text)
+    if len(tokens) < 2 or len(tokens) > 4:
+        return False
+    if not all(token[0].isupper() for token in tokens):
+        return False
+    # Avoid all-caps taglines being marked as person names.
+    if any(token.isupper() and len(token) > 1 for token in tokens):
+        return False
+    return True
+
+
+def _looks_like_brand(text: str) -> bool:
+    letters_only = re.sub(r"[^A-Za-z]", "", text)
+    if len(letters_only) < 3:
+        return False
+    uppercase_letters = sum(1 for ch in letters_only if ch.isupper())
+    return uppercase_letters / len(letters_only) >= 0.8
+
+
+def assign_semantic_tags(detections: list[dict]) -> list[dict]:
+    if not detections:
+        return detections
+
+    brand_whitelist = parse_whitelist(BRAND_WHITELIST_RAW)
+    proper_whitelist = parse_whitelist(PROPER_NAME_WHITELIST_RAW)
+
+    grouped: dict[str, list[dict]] = {}
+    for det in detections:
+        group_id = det.get("variation_group_id") or str(uuid.uuid4())
+        grouped.setdefault(group_id, []).append(det)
+
+    for group in grouped.values():
+        canonical_text = (
+            group[0].get("canonical_text")
+            or group[0].get("text")
+            or ""
+        )
+        canonical_norm = normalize_text_for_similarity(canonical_text)
+        count = len(group)
+        overlap = _average_spatial_overlap(group)
+        has_fixed = any(d.get("category") == "fixed_text" for d in group)
+
+        is_brand = False
+        is_proper = False
+
+        if canonical_norm in brand_whitelist:
+            is_brand = True
+        elif has_fixed and count >= 2 and overlap >= 0.6:
+            is_brand = True
+        elif _looks_like_brand(canonical_text) and (has_fixed or count >= 2):
+            is_brand = True
+
+        if canonical_norm in proper_whitelist:
+            is_proper = True
+        elif _looks_like_proper_name(canonical_text):
+            is_proper = True
+
+        for det in group:
+            tags: list[str] = []
+            if is_proper:
+                tags.append("proper_name")
+            if is_brand:
+                tags.append("brand_name")
+
+            det["semantic_tags"] = tags
+            det["is_name_or_brand"] = bool(tags)
+
+    return detections
+
+
 # --- 5. Audio Transcription (Gemini) ---
 def extract_audio(video_path: str, tmp_dir: str) -> str:
     _ensure_ffmpeg()
@@ -807,9 +1102,15 @@ def check_spelling(texts: list[dict]) -> list[dict]:
 
 def filter_false_positives(errors: list[dict], detections: list[dict]) -> list[dict]:
     """Filter out spelling errors that are brand names or partial sequences."""
-    brand_names = {
-        d["text"].lower() for d in detections if d.get("is_fixed_text")
-    }
+    brand_or_name_texts: set[str] = set()
+    brand_or_name_tokens: set[str] = set()
+    for detection in detections:
+        tags = detection.get("semantic_tags") or []
+        if detection.get("is_name_or_brand") or "proper_name" in tags or "brand_name" in tags:
+            normalized = normalize_text_for_similarity(detection.get("canonical_text") or detection.get("text"))
+            if normalized:
+                brand_or_name_texts.add(normalized)
+                brand_or_name_tokens.update(normalized.split())
 
     # Rule IDs that flag capitalization of the first letter in a sentence
     capitalization_rules = {
@@ -822,11 +1123,11 @@ def filter_false_positives(errors: list[dict], detections: list[dict]) -> list[d
 
     filtered = []
     for error in errors:
-        original_lower = error["original_text"].lower()
+        original_lower = normalize_text_for_similarity(error["original_text"])
         rule_id = error.get("rule_id", "")
 
-        # Skip if it's a brand name
-        if original_lower in brand_names:
+        # Skip if it's a brand/proper name
+        if original_lower in brand_or_name_texts or original_lower in brand_or_name_tokens:
             continue
 
         # Skip common false positives for proper nouns
@@ -933,6 +1234,12 @@ def store_text_detections(supabase, project_id: str, detections: list[dict]):
             "is_subtitle": d.get("is_subtitle", False),
             "is_fixed_text": d.get("is_fixed_text", False),
             "is_partial_sequence": d.get("is_partial_sequence", False),
+            "category": d.get("category", "subtitle_text"),
+            "semantic_tags": d.get("semantic_tags", []),
+            "canonical_text": d.get("canonical_text"),
+            "variation_group_id": d.get("variation_group_id"),
+            "variation_similarity": d.get("variation_similarity"),
+            "is_name_or_brand": d.get("is_name_or_brand", False),
         })
     if rows:
         supabase.table("text_detections").insert(rows).execute()
@@ -1061,11 +1368,17 @@ def analyze_video(request):
             print(f"  Video duration: {video_duration:.1f}s", flush=True)
 
             classified = classify_subtitle_vs_fixed(merged, video_duration)
-            n_subtitles = sum(1 for d in classified if d.get("is_subtitle"))
-            n_fixed = sum(1 for d in classified if d.get("is_fixed_text"))
+            classified = set_structural_category_fields(classified)
+            classified = assign_text_variation_groups(classified, LEVENSHTEIN_THRESHOLD)
+            classified = assign_semantic_tags(classified)
+
+            n_subtitles = sum(1 for d in classified if d.get("category") == "subtitle_text")
+            n_fixed = sum(1 for d in classified if d.get("category") == "fixed_text")
+            n_partial = sum(1 for d in classified if d.get("category") == "partial_sequence")
+            n_name_or_brand = sum(1 for d in classified if d.get("is_name_or_brand"))
             store_text_detections(supabase, project_id, classified)
             update_status(supabase, project_id, "detecting_text", 40,
-                          f"Text classified: {n_subtitles} subtitles, {n_fixed} fixed texts")
+                          f"Text classified: {n_subtitles} subtitles, {n_fixed} fixed, {n_partial} partial, {n_name_or_brand} names/brands")
 
             # ── Step 3: Transcribe audio (Gemini) ───────────────────
             t3 = time.time()
@@ -1088,7 +1401,7 @@ def analyze_video(request):
             subtitle_texts = [
                 {"text": d["text"], "start_time": d["start_time"]}
                 for d in classified
-                if d.get("is_subtitle") and not d.get("is_partial_sequence")
+                if d.get("category") == "subtitle_text"
             ]
             update_status(supabase, project_id, "checking_spelling", 70,
                           f"Checking spelling on {len(subtitle_texts)} subtitle segments...")

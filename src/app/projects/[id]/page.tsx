@@ -24,6 +24,7 @@ export default function ProjectDetailPage() {
   const [project, setProject] = useState<Project | null>(null);
   const [subtitles, setSubtitles] = useState<TextDetection[]>([]);
   const [fixedTexts, setFixedTexts] = useState<TextDetection[]>([]);
+  const [nameBrandTexts, setNameBrandTexts] = useState<TextDetection[]>([]);
 
   const [transcriptions, setTranscriptions] = useState<Transcription[]>([]);
   const [spellingErrors, setSpellingErrors] = useState<SpellingError[]>([]);
@@ -63,20 +64,39 @@ export default function ProjectDetailPage() {
       .order("start_time");
 
     if (detections) {
-      const all = (detections as TextDetection[]).filter((d) => d.is_partial_sequence !== true);
+      const all = detections as TextDetection[];
+      const getCategory = (d: TextDetection) => {
+        if (d.category) return d.category;
+        if (d.is_partial_sequence) return "partial_sequence";
+        if (d.is_fixed_text) return "fixed_text";
+        return "subtitle_text";
+      };
+      const hasSemanticTag = (d: TextDetection, tag: "proper_name" | "brand_name") =>
+        (d.semantic_tags ?? []).includes(tag);
 
+      const nonPartial = all.filter((d) => getCategory(d) !== "partial_sequence");
+      const fixed = nonPartial.filter((d) => getCategory(d) === "fixed_text");
+      const fixedTextSet = new Set(
+        fixed.map((d) => (d.canonical_text ?? d.text).trim().toLowerCase())
+      );
 
-      // Collect fixed text strings to exclude from subtitles panel
-      const fixed = all.filter((d) => d.is_fixed_text);
-      const fixedTextSet = new Set(fixed.map((d) => d.text.trim().toLowerCase()));
+      const subs = nonPartial.filter(
+        (d) =>
+          getCategory(d) === "subtitle_text" &&
+          !fixedTextSet.has((d.canonical_text ?? d.text).trim().toLowerCase())
+      );
 
-      // Filter subtitles: exclude any text that also appears as fixed/brand text
-      const subs = all.filter(
-        (d) => d.is_subtitle && !fixedTextSet.has(d.text.trim().toLowerCase())
+      const namesAndBrands = nonPartial.filter(
+        (d) => d.is_name_or_brand || hasSemanticTag(d, "proper_name") || hasSemanticTag(d, "brand_name")
       );
 
       setSubtitles(subs);
       setFixedTexts(fixed);
+      setNameBrandTexts(namesAndBrands);
+    } else {
+      setSubtitles([]);
+      setFixedTexts([]);
+      setNameBrandTexts([]);
     }
 
     // Fetch transcriptions
@@ -172,6 +192,7 @@ export default function ProjectDetailPage() {
       setProject(updatedProject as Project);
       setSubtitles([]);
       setFixedTexts([]);
+      setNameBrandTexts([]);
 
       setTranscriptions([]);
       setSpellingErrors([]);
@@ -293,7 +314,7 @@ export default function ProjectDetailPage() {
         {/* Bottom panels */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <SpellingPanel errors={spellingErrors} />
-          <BrandNamesPanel fixedTexts={fixedTexts} />
+          <BrandNamesPanel detections={nameBrandTexts} />
         </div>
       </main>
 
