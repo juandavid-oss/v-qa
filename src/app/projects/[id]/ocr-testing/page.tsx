@@ -73,6 +73,103 @@ interface OcrTestResponse {
   audit_rows: OcrAuditRow[];
 }
 
+interface LegacyOcrTestResponse {
+  status?: string;
+  mode?: string;
+  counts?: Partial<OcrTestResponse["counts"]>;
+  raw_detections?: OcrDetection[];
+  audit_rows?: OcrAuditRow[];
+  classified_detections?: OcrDetection[];
+  filtered_subtitles?: OcrDetection[];
+}
+
+const EMPTY_COUNTS: OcrTestResponse["counts"] = {
+  raw: 0,
+  merged: 0,
+  subtitle: 0,
+  fixed: 0,
+  partial: 0,
+  filtered_subtitles: 0,
+  brand_name: 0,
+  proper_name: 0,
+  spelling_checked: 0,
+  spelling_raw_matches: 0,
+  spelling_kept_matches: 0,
+  spelling_with_error: 0,
+  spelling_filtered_out: 0,
+  spelling_no_error: 0,
+};
+
+function getDetectionKey(d: OcrDetection) {
+  return `${d.text}|${d.start_time}|${d.end_time}`;
+}
+
+function fallbackStructuralClassification(d: OcrDetection): OcrAuditRow["structural_classification"] {
+  if (d.is_partial_sequence) return "sequential";
+  if (d.is_fixed_text) return "fixed";
+  if (d.is_subtitle) return "subtitle";
+  return "unknown";
+}
+
+function buildFallbackAuditRows(payload: LegacyOcrTestResponse): OcrAuditRow[] {
+  const classified = Array.isArray(payload.classified_detections) ? payload.classified_detections : [];
+  const filtered = Array.isArray(payload.filtered_subtitles) ? payload.filtered_subtitles : [];
+  const filteredSet = new Set(filtered.map(getDetectionKey));
+
+  return classified.map((d, index) => {
+    const included = filteredSet.has(getDetectionKey(d));
+    const subtitleFilterReason = d.is_partial_sequence
+      ? "excluded_partial_sequence"
+      : !d.is_subtitle
+        ? "excluded_not_subtitle"
+        : included
+          ? "included_in_final_subtitles"
+          : "excluded_matches_fixed_text";
+
+    return {
+      order: index + 1,
+      detection_id: `legacy_${index}`,
+      text: d.text ?? "",
+      start_time: d.start_time ?? 0,
+      end_time: d.end_time ?? 0,
+      confidence: d.confidence,
+      structural_classification: fallbackStructuralClassification(d),
+      semantic_tags: Array.isArray(d.semantic_tags) ? d.semantic_tags : [],
+      included_in_final_subtitles: included,
+      checked_in_spelling: false,
+      subtitle_filter_reason: subtitleFilterReason,
+      spelling_status: "not_checked",
+      spelling_raw_match_count: 0,
+      spelling_kept_match_count: 0,
+      spelling_raw_matches: [],
+      spelling_kept_matches: [],
+    };
+  });
+}
+
+function normalizeOcrTestResponse(payload: LegacyOcrTestResponse): OcrTestResponse {
+  const rawDetections = Array.isArray(payload.raw_detections) ? payload.raw_detections : [];
+  const auditRows =
+    Array.isArray(payload.audit_rows) && payload.audit_rows.length > 0
+      ? payload.audit_rows
+      : buildFallbackAuditRows(payload);
+
+  return {
+    status: payload.status ?? "ok",
+    mode: payload.mode ?? "classify_ocr_payload",
+    counts: {
+      ...EMPTY_COUNTS,
+      ...(payload.counts ?? {}),
+      raw: payload.counts?.raw ?? rawDetections.length,
+      filtered_subtitles:
+        payload.counts?.filtered_subtitles ??
+        auditRows.filter((row) => row.included_in_final_subtitles).length,
+    },
+    raw_detections: rawDetections,
+    audit_rows: auditRows,
+  };
+}
+
 function subtitleFilterReasonLabel(reason: string) {
   switch (reason) {
     case "included_in_final_subtitles":
@@ -141,11 +238,11 @@ export default function OcrTestingPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ project_id: projectId }),
       });
-      const payload = (await response.json().catch(() => null)) as OcrTestResponse | { error?: string } | null;
+      const payload = (await response.json().catch(() => null)) as LegacyOcrTestResponse | { error?: string } | null;
       if (!response.ok || !payload || !("status" in payload)) {
         throw new Error((payload as { error?: string } | null)?.error || "Failed to run OCR testing");
       }
-      setResult(payload);
+      setResult(normalizeOcrTestResponse(payload));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unexpected OCR testing error");
     } finally {
