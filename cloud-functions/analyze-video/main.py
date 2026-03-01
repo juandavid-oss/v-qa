@@ -56,7 +56,8 @@ SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL") or "gemini-flash-latest"
 GEMINI_FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-1.5-flash")
-LANGUAGETOOL_URL = os.environ.get("LANGUAGETOOL_URL", "https://api.languagetool.org/v2/check")
+SPELLCHECK_API_URL = os.environ.get("SPELLCHECK_API_URL", "https://api.api-ninjas.com/v1/spellcheck")
+SPELLCHECK_API_KEY = os.environ.get("SPELLCHECK_API_KEY")
 CLOUD_FUNCTION_SECRET = os.environ.get("CLOUD_FUNCTION_SECRET")
 MIN_SUBTITLE_CONFIDENCE = float(os.environ.get("MIN_SUBTITLE_CONFIDENCE", "0.9"))
 FRAME_IO_TOKEN = os.environ.get("FRAME_IO_TOKEN") or os.environ.get("FRAME_IO_V4_TOKEN")
@@ -74,7 +75,6 @@ VIDEO_EXT_RE = re.compile(r"\.(mp4|mov|m4v|webm|avi|mkv|mxf)(\?|$)", re.IGNORECA
 IMAGE_EXT_RE = re.compile(r"\.(jpg|jpeg|png|webp|gif|svg|avif)(\?|$)", re.IGNORECASE)
 POSITIVE_URL_HINTS = ("video", "download", "source", "original", "proxy", "stream", "transcode", "playback")
 NEGATIVE_URL_HINTS = ("thumbnail", "thumb", "poster", "sprite", "waveform", "image")
-WORD_TOKEN_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'\-’]*")
 
 
 def get_supabase():
@@ -877,127 +877,79 @@ def is_gemini_model_unavailable_error(message: str) -> bool:
     return False
 
 
-# --- 6. Spelling & Grammar Check (LanguageTool) ---
-def _extract_spellcheck_tokens(text: str) -> list[tuple[str, int, int]]:
-    tokens: list[tuple[str, int, int]] = []
-    for match in WORD_TOKEN_RE.finditer(text or ""):
-        token = match.group(0)
-        # Skip ultra-short tokens that are commonly noise.
-        if len(token) < 2:
-            continue
-        tokens.append((token, match.start(), match.end()))
-    return tokens
-
-
-def _is_typo_match(match: dict) -> bool:
-    rule = match.get("rule", {}) if isinstance(match.get("rule"), dict) else {}
-    rule_id = read_string(rule.get("id")).upper()
-    issue_type = read_string(rule.get("issueType")).lower()
-    category = rule.get("category", {}) if isinstance(rule.get("category"), dict) else {}
-    category_id = read_string(category.get("id")).upper()
-    category_name = read_string(category.get("name")).upper()
-
-    if issue_type in {"misspelling", "typographical", "typo"}:
-        return True
-    if "TYPO" in category_id or "TYPO" in category_name:
-        return True
-    if "MORFOLOGIK" in rule_id or "HUNSPELL" in rule_id or "SPELLER" in rule_id:
-        return True
-    return False
-
-
+# --- 6. Spelling & Grammar Check (API Ninjas Spellcheck) ---
 def check_spelling(
     texts: list[dict],
     debug_by_detection_id: dict[str, list[dict]] | None = None,
 ) -> list[dict]:
-    """Check per-word typos using LanguageTool API."""
+    """Check typos with API Ninjas Spellcheck (send whole subtitle sentence)."""
     errors = []
-    token_cache: dict[str, dict] = {}
+
+    if not SPELLCHECK_API_KEY:
+        raise ValueError("SPELLCHECK_API_KEY is not configured")
 
     for item in texts:
         text = item["text"]
         timestamp = item.get("start_time", 0)
         detection_id = item.get("detection_id")
-        token_spans = _extract_spellcheck_tokens(text)
-        if not token_spans:
+        if not text or not text.strip():
             continue
 
-        for token, token_start, token_end in token_spans:
-            cache_key = token.casefold()
-            cache_entry = token_cache.get(cache_key)
-            from_cache = cache_entry is not None
+        response = requests.get(
+            SPELLCHECK_API_URL,
+            headers={"X-Api-Key": SPELLCHECK_API_KEY},
+            params={"text": text},
+            timeout=30,
+        )
+        response_payload: dict = {}
+        if response.status_code == 200:
+            parsed = response.json()
+            response_payload = parsed if isinstance(parsed, dict) else {}
+        else:
+            print(
+                f"Spellcheck API request failed (status={response.status_code}) for text: {text[:120]}",
+                flush=True,
+            )
 
-            if cache_entry is None:
-                response = requests.post(
-                    LANGUAGETOOL_URL,
-                    data={"text": token, "language": "auto"},
-                    timeout=30,
-                )
-                if response.status_code != 200:
-                    cache_entry = {
-                        "status_code": response.status_code,
-                        "result": {},
-                        "typo_matches": [],
-                    }
-                    token_cache[cache_key] = cache_entry
-                    if debug_by_detection_id is not None and detection_id:
-                        debug_by_detection_id.setdefault(detection_id, []).append({
-                            "token": token,
-                            "from_cache": False,
-                            "status_code": response.status_code,
-                            "langtool_response": {},
-                            "typo_matches": [],
-                            "typo_match_count": 0,
-                        })
-                    continue
+        corrections = response_payload.get("corrections", [])
+        if not isinstance(corrections, list):
+            corrections = []
 
-                result = response.json()
-                typo_matches = [
-                    m for m in result.get("matches", [])
-                    if isinstance(m, dict) and _is_typo_match(m)
-                ]
-                cache_entry = {
-                    "status_code": response.status_code,
-                    "result": result,
-                    "typo_matches": typo_matches,
-                }
-                token_cache[cache_key] = cache_entry
+        if debug_by_detection_id is not None and detection_id:
+            debug_by_detection_id.setdefault(detection_id, []).append({
+                "provider": "api_ninjas",
+                "request_text": text,
+                "status_code": response.status_code,
+                "response_json": response_payload,
+                "correction_count": len(corrections),
+            })
 
-            matches = cache_entry.get("typo_matches", []) if isinstance(cache_entry, dict) else []
-            status_code = cache_entry.get("status_code", 200) if isinstance(cache_entry, dict) else 200
-            result_payload = cache_entry.get("result", {}) if isinstance(cache_entry, dict) else {}
+        if response.status_code != 200:
+            continue
 
-            if debug_by_detection_id is not None and detection_id:
-                debug_by_detection_id.setdefault(detection_id, []).append({
-                    "token": token,
-                    "from_cache": from_cache,
-                    "status_code": status_code,
-                    "langtool_response": result_payload,
-                    "typo_matches": matches,
-                    "typo_match_count": len(matches),
-                })
-
-            if not matches:
+        for correction in corrections:
+            if not isinstance(correction, dict):
                 continue
+            original_word = read_string(correction.get("word"))
+            if not original_word:
+                continue
+            suggested = read_string(correction.get("correction"))
+            candidates = correction.get("candidates", [])
+            if not suggested and isinstance(candidates, list) and candidates:
+                suggested = read_string(candidates[0])
+            if not suggested:
+                suggested = original_word
 
-            # Build context around the token in the original subtitle segment.
-            context_start = max(0, token_start - 20)
-            context_end = min(len(text), token_end + 20)
-            context = text[context_start:context_end]
-
-            for match in matches:
-                replacements = match.get("replacements", [])
-                suggested = replacements[0]["value"] if replacements else token
-                errors.append({
-                    "original_text": token,
-                    "suggested_text": suggested,
-                    "context": context,
-                    "timestamp": timestamp,
-                    "detection_id": detection_id,
-                    "rule_id": match.get("rule", {}).get("id", ""),
-                    "source": "subtitle",
-                    "has_replacement": bool(replacements),
-                })
+            errors.append({
+                "original_text": original_word,
+                "suggested_text": suggested,
+                "context": text,
+                "timestamp": timestamp,
+                "detection_id": detection_id,
+                "rule_id": "API_NINJAS_SPELLCHECK",
+                "source": "subtitle",
+                "has_replacement": suggested.lower() != original_word.lower(),
+            })
 
     return errors
 
@@ -1595,7 +1547,7 @@ def analyze_video(request):
             update_status(supabase, project_id, "transcribing_audio", 65,
                           f"Transcription done: {len(transcription_segments)} segments in {elapsed:.1f}s")
 
-            # ── Step 4: Check spelling (LanguageTool) ───────────────
+            # ── Step 4: Check spelling (API Ninjas) ─────────────────
             t4 = time.time()
             subtitle_texts = [
                 {"text": d["text"], "start_time": d["start_time"]}

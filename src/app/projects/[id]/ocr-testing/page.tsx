@@ -49,12 +49,11 @@ interface OcrAuditRow {
     has_replacement: boolean;
   }>;
   spelling_debug?: Array<{
-    token: string;
-    from_cache: boolean;
+    provider?: string;
+    request_text?: string;
     status_code: number;
-    typo_match_count: number;
-    typo_matches: unknown[];
-    langtool_response: unknown;
+    correction_count?: number;
+    response_json?: unknown;
   }>;
 }
 
@@ -452,7 +451,7 @@ export default function OcrTestingPage() {
                       <th className="py-2 pr-4">Semantic</th>
                       <th className="py-2 pr-4">Subtitle filter</th>
                       <th className="py-2 pr-4">Spelling</th>
-                      <th className="py-2 pr-4">LT JSON</th>
+                      <th className="py-2 pr-4">Spell API JSON</th>
                       <th className="py-2 pr-4">Time</th>
                       <th className="py-2 pr-4">Confidence</th>
                       <th className="py-2">Text</th>
