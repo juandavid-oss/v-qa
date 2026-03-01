@@ -1046,6 +1046,13 @@ def is_gemini_model_unavailable_error(message: str) -> bool:
 
 
 # --- 6. Spelling & Grammar Check (API Ninjas Spellcheck) ---
+def _normalize_spell_token(text: str) -> str:
+    """Normalize token for typo comparison (ignore case/punctuation differences)."""
+    if not text:
+        return ""
+    return re.sub(r"[^\w\s]", "", text).strip().lower()
+
+
 def check_spelling(
     texts: list[dict],
     debug_by_detection_id: dict[str, list[dict]] | None = None,
@@ -1115,6 +1122,8 @@ def check_spelling(
             if not suggested:
                 suggested = original_word
 
+            original_norm = _normalize_spell_token(original_word)
+            suggested_norm = _normalize_spell_token(suggested)
             errors.append({
                 "original_text": original_word,
                 "suggested_text": suggested,
@@ -1123,14 +1132,14 @@ def check_spelling(
                 "detection_id": detection_id,
                 "rule_id": "API_NINJAS_SPELLCHECK",
                 "source": "subtitle",
-                "has_replacement": suggested.lower() != original_word.lower(),
+                "has_replacement": bool(original_norm and suggested_norm and suggested_norm != original_norm),
             })
 
     return errors
 
 
 def filter_false_positives(errors: list[dict], detections: list[dict]) -> list[dict]:
-    """Filter out spelling errors that are brand names or case-only diffs."""
+    """Filter out spelling errors that are brand names or punctuation/case-only diffs."""
     brand_names = {
         d["text"].lower() for d in detections if d.get("is_fixed_text")
     }
@@ -1145,13 +1154,13 @@ def filter_false_positives(errors: list[dict], detections: list[dict]) -> list[d
         if original_lower in brand_names:
             continue
 
-        # Skip if only difference is capitalization
+        # Skip if only difference is capitalization/punctuation
         suggested = error.get("suggested_text", "")
         if (
             has_replacement
             and original
             and suggested
-            and original.lower() == suggested.lower()
+            and _normalize_spell_token(original) == _normalize_spell_token(suggested)
         ):
             continue
 
