@@ -69,6 +69,39 @@ interface OcrAuditRow {
   }>;
 }
 
+interface SyncReportSummary {
+  total_subtitles: number;
+  synced: number;
+  likely_synced: number;
+  misaligned: number;
+  duplicates_found: number;
+  avg_word_overlap_ratio: number;
+  overall_sync_status: "GOOD" | "WARNING" | "BAD";
+}
+
+interface SyncReportDetail {
+  subtitle_index: number;
+  subtitle_time_seconds: [number, number];
+  subtitle_text: string;
+  matched_transcription_text: string;
+  word_overlap_ratio: number;
+  edit_distance: number;
+  status: "SYNCED" | "LIKELY_SYNCED" | "MISALIGNED";
+  issues: string[];
+}
+
+interface SyncReportDuplicate {
+  subtitle_indices: [number, number];
+  overlapping_time_seconds: [number, number];
+  texts: [string, string];
+}
+
+interface SyncReport {
+  summary: SyncReportSummary;
+  details: SyncReportDetail[];
+  duplicates: SyncReportDuplicate[];
+}
+
 interface OcrTestResponse {
   status: string;
   mode: string;
@@ -90,6 +123,7 @@ interface OcrTestResponse {
   };
   raw_detections: OcrDetection[];
   audit_rows: OcrAuditRow[];
+  sync_report?: SyncReport;
 }
 
 interface LegacyOcrTestResponse {
@@ -100,6 +134,7 @@ interface LegacyOcrTestResponse {
   audit_rows?: OcrAuditRow[];
   classified_detections?: OcrDetection[];
   filtered_subtitles?: OcrDetection[];
+  sync_report?: SyncReport;
 }
 
 const EMPTY_COUNTS: OcrTestResponse["counts"] = {
@@ -315,6 +350,7 @@ function normalizeOcrTestResponse(payload: LegacyOcrTestResponse): OcrTestRespon
     },
     raw_detections: rawDetections,
     audit_rows: auditRows,
+    sync_report: payload.sync_report,
   };
 }
 

@@ -6,6 +6,7 @@ import time
 import traceback
 import uuid
 import json
+import difflib
 import subprocess
 import tempfile
 from functools import cmp_to_key
@@ -1168,25 +1169,261 @@ _NUMBER_WORDS = {
 }
 
 
-def _normalize_for_comparison(text: str) -> str:
-    """Normalize text: lowercase, strip punctuation, unify numbers, collapse whitespace."""
-    t = text.lower().strip()
-    # Strip ALL punctuation, exclamation/question marks, periods, commas, apostrophes, etc.
-    t = re.sub(r"[^\w\s]", "", t)
-    # Normalize number words to digits
+SYNCED_RATIO_THRESHOLD = 0.8
+LIKELY_SYNCED_RATIO_THRESHOLD = 0.5
+OFFSET_SCAN_STEP_SECONDS = 0.1
+OFFSET_MIN_RATIO_IMPROVEMENT = 0.2
+
+
+def _normalize_text_for_sync(text: str) -> str:
+    """Normalize text for subtitle-transcription sync checks."""
+    value = (text or "").lower().strip()
+    value = re.sub(r"[^\w\s]", " ", value)
     for word, digit in _NUMBER_WORDS.items():
-        t = re.sub(r"\b" + re.escape(word) + r"\b", digit, t)
-    # Collapse multiple spaces/tabs into single space
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
+        value = re.sub(r"\b" + re.escape(word) + r"\b", digit, value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
 
 
-def _normalize_for_contains(text: str) -> str:
-    """Normalize text for strict contains checks (ignore punctuation/case/spacing)."""
-    return _normalize_for_comparison(text).replace(" ", "")
+def _tokenize_text_for_sync(text: str) -> list[str]:
+    normalized = _normalize_text_for_sync(text)
+    return normalized.split() if normalized else []
 
 
-OVERLAP_TOLERANCE = 1.5
+def _build_segment_word_windows(segment: dict) -> list[dict]:
+    text = segment.get("text") or ""
+    tokens = _tokenize_text_for_sync(text)
+    if not tokens:
+        return []
+
+    start = _to_float(segment.get("start_time"), 0.0)
+    end = _to_float(segment.get("end_time"), start)
+    if end <= start:
+        return []
+
+    token_duration = (end - start) / max(len(tokens), 1)
+    windows: list[dict] = []
+    for i, token in enumerate(tokens):
+        token_start = start + (i * token_duration)
+        token_end = start + ((i + 1) * token_duration)
+        windows.append({
+            "token": token,
+            "start_time": token_start,
+            "end_time": token_end,
+        })
+    return windows
+
+
+def _collect_aligned_tokens_for_window(start: float, end: float, segments: list[dict]) -> list[str]:
+    if end <= start:
+        return []
+    tokens: list[str] = []
+    for segment in segments:
+        for window in _build_segment_word_windows(segment):
+            if window["end_time"] > start and window["start_time"] < end:
+                tokens.append(window["token"])
+    return tokens
+
+
+def _compute_word_overlap_ratio(sub_tokens: list[str], asr_tokens: list[str]) -> float:
+    subtitle_words = set(sub_tokens)
+    if not subtitle_words:
+        return 0.0
+    common = subtitle_words.intersection(set(asr_tokens))
+    return len(common) / len(subtitle_words)
+
+
+def _levenshtein_distance(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        curr = [i]
+        for j, cb in enumerate(b, start=1):
+            insert_cost = curr[j - 1] + 1
+            delete_cost = prev[j] + 1
+            replace_cost = prev[j - 1] + (0 if ca == cb else 1)
+            curr.append(min(insert_cost, delete_cost, replace_cost))
+        prev = curr
+    return prev[-1]
+
+
+def _detect_subtitle_overlaps(subtitles: list[dict]) -> list[dict]:
+    overlaps: list[dict] = []
+    for i, first in enumerate(subtitles):
+        a_start = _to_float(first.get("start_time"), 0.0)
+        a_end = _to_float(first.get("end_time"), a_start)
+        if a_end <= a_start:
+            continue
+        for j in range(i + 1, len(subtitles)):
+            second = subtitles[j]
+            b_start = _to_float(second.get("start_time"), 0.0)
+            b_end = _to_float(second.get("end_time"), b_start)
+            if b_end <= b_start:
+                continue
+            overlap_start = max(a_start, b_start)
+            overlap_end = min(a_end, b_end)
+            if overlap_end > overlap_start:
+                overlaps.append({
+                    "subtitle_indices": [i, j],
+                    "overlapping_time_seconds": [round(overlap_start, 3), round(overlap_end, 3)],
+                    "texts": [first.get("text", ""), second.get("text", "")],
+                })
+    return overlaps
+
+
+def _find_best_temporal_offset(subtitle: dict, transcriptions: list[dict], window: float, step: float) -> dict:
+    safe_step = step if step > 0 else OFFSET_SCAN_STEP_SECONDS
+    subtitle_text = subtitle.get("text", "")
+    subtitle_tokens = _tokenize_text_for_sync(subtitle_text)
+    subtitle_start = _to_float(subtitle.get("start_time"), 0.0)
+    subtitle_end = _to_float(subtitle.get("end_time"), subtitle_start)
+
+    baseline_tokens = _collect_aligned_tokens_for_window(subtitle_start, subtitle_end, transcriptions)
+    baseline_ratio = _compute_word_overlap_ratio(subtitle_tokens, baseline_tokens)
+
+    best_ratio = baseline_ratio
+    best_offset = 0.0
+    best_tokens = baseline_tokens
+
+    scans = int(round((2 * window) / safe_step))
+    for i in range(scans + 1):
+        offset = -window + (i * safe_step)
+        if abs(offset) < 1e-9:
+            continue
+        shifted_tokens = _collect_aligned_tokens_for_window(
+            subtitle_start + offset,
+            subtitle_end + offset,
+            transcriptions,
+        )
+        ratio = _compute_word_overlap_ratio(subtitle_tokens, shifted_tokens)
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_offset = offset
+            best_tokens = shifted_tokens
+
+    ratio_improvement = best_ratio - baseline_ratio
+    material_improvement = ratio_improvement >= OFFSET_MIN_RATIO_IMPROVEMENT and best_ratio >= SYNCED_RATIO_THRESHOLD
+    return {
+        "baseline_ratio": baseline_ratio,
+        "best_ratio": best_ratio,
+        "best_offset_seconds": round(best_offset, 3),
+        "best_text": " ".join(best_tokens),
+        "material_improvement": material_improvement,
+        "ratio_improvement": ratio_improvement,
+    }
+
+
+def build_sync_report(
+    subtitles: list[dict],
+    transcriptions: list[dict],
+    offset_window_seconds: float = 1.5,
+) -> dict:
+    duplicates = _detect_subtitle_overlaps(subtitles)
+    duplicate_map: dict[int, list[int]] = {}
+    for duplicate in duplicates:
+        first, second = duplicate["subtitle_indices"]
+        duplicate_map.setdefault(first, []).append(second)
+        duplicate_map.setdefault(second, []).append(first)
+
+    details: list[dict] = []
+    synced = 0
+    likely_synced = 0
+    misaligned = 0
+    ratio_sum = 0.0
+
+    for index, subtitle in enumerate(subtitles):
+        subtitle_text = subtitle.get("text", "") or ""
+        start = _to_float(subtitle.get("start_time"), 0.0)
+        end = _to_float(subtitle.get("end_time"), start)
+        subtitle_tokens = _tokenize_text_for_sync(subtitle_text)
+        aligned_tokens = _collect_aligned_tokens_for_window(start, end, transcriptions)
+        matched_transcription_text = " ".join(aligned_tokens)
+        ratio = _compute_word_overlap_ratio(subtitle_tokens, aligned_tokens)
+        ratio_sum += ratio
+        issues: list[str] = []
+
+        if not subtitle_text.strip():
+            issues.append("EMPTY_SUBTITLE_TEXT")
+        if not aligned_tokens:
+            issues.append("NO_OVERLAPPING_TRANSCRIPTION")
+
+        if ratio >= SYNCED_RATIO_THRESHOLD:
+            status = "SYNCED"
+            synced += 1
+        elif ratio >= LIKELY_SYNCED_RATIO_THRESHOLD:
+            status = "LIKELY_SYNCED"
+            likely_synced += 1
+        else:
+            status = "MISALIGNED"
+            misaligned += 1
+
+        duplicate_peers = duplicate_map.get(index, [])
+        for peer in duplicate_peers:
+            issues.append(f"DUPLICATE_OVERLAP: overlaps subtitle #{peer}")
+
+        if status == "LIKELY_SYNCED" and subtitle_tokens and aligned_tokens:
+            diff_ops = difflib.SequenceMatcher(a=subtitle_tokens, b=aligned_tokens).get_opcodes()
+            has_diff = any(tag != "equal" for tag, _, _, _, _ in diff_ops)
+            if has_diff:
+                issues.append(
+                    f"OCR_ERROR_CANDIDATE: expected '{matched_transcription_text}' got '{_normalize_text_for_sync(subtitle_text)}'"
+                )
+
+        offset_info = _find_best_temporal_offset(
+            subtitle,
+            transcriptions,
+            window=offset_window_seconds,
+            step=OFFSET_SCAN_STEP_SECONDS,
+        )
+        if offset_info["material_improvement"] and abs(offset_info["best_offset_seconds"]) > 0:
+            issues.append(
+                f"TEMPORAL_OFFSET: best_shift_seconds={offset_info['best_offset_seconds']} best_ratio={offset_info['best_ratio']:.3f}"
+            )
+
+        detail = {
+            "subtitle_index": index,
+            "subtitle_time_seconds": [round(start, 3), round(end, 3)],
+            "subtitle_text": subtitle_text,
+            "matched_transcription_text": matched_transcription_text,
+            "word_overlap_ratio": round(ratio, 4),
+            "edit_distance": _levenshtein_distance(
+                " ".join(subtitle_tokens),
+                matched_transcription_text,
+            ),
+            "status": status,
+            "issues": issues,
+        }
+        details.append(detail)
+
+    total = len(subtitles)
+    avg_ratio = (ratio_sum / total) if total else 0.0
+    synced_share = (synced / total) if total else 1.0
+    if synced_share > 0.9:
+        overall = "GOOD"
+    elif synced_share >= 0.7:
+        overall = "WARNING"
+    else:
+        overall = "BAD"
+
+    return {
+        "summary": {
+            "total_subtitles": total,
+            "synced": synced,
+            "likely_synced": likely_synced,
+            "misaligned": misaligned,
+            "duplicates_found": len(duplicates),
+            "avg_word_overlap_ratio": round(avg_ratio, 4),
+            "overall_sync_status": overall,
+        },
+        "details": details,
+        "duplicates": duplicates,
+    }
 
 
 def _bbox_coord_for_sort(subtitle: dict, coord: str) -> float:
@@ -1239,43 +1476,39 @@ def _compare_subtitles_for_join(a: dict, b: dict) -> int:
 
 
 def detect_mismatches(subtitles: list[dict], transcriptions: list[dict]) -> list[dict]:
-    """Flag transcription rows not contained in nearby subtitles (±1.5s window)."""
+    """Persistable mismatch rows: only MISALIGNED subtitle checks."""
+    report = build_sync_report(
+        subtitles=subtitles,
+        transcriptions=transcriptions,
+        offset_window_seconds=1.5,
+    )
     mismatches = []
 
-    for t in transcriptions:
-        # Join nearby subtitle text around the transcription window.
-        nearby_subs = [
-            s for s in subtitles
-            if s["start_time"] <= (t["end_time"] + OVERLAP_TOLERANCE)
-            and s["end_time"] >= (t["start_time"] - OVERLAP_TOLERANCE)
-        ]
-
-        if not nearby_subs:
-            mismatches.append({
-                "subtitle_text": "[no nearby subtitle]",
-                "transcription_text": t["text"],
-                "start_time": t["start_time"],
-                "end_time": t["end_time"],
-                "severity": "high",
-                "mismatch_type": "missing_subtitle_window",
-            })
+    for detail in report.get("details", []):
+        if detail.get("status") != "MISALIGNED":
             continue
 
-        nearby_subs.sort(key=cmp_to_key(_compare_subtitles_for_join))
-        joined_subtitles = " ".join(s.get("text", "") for s in nearby_subs if s.get("text"))
-        norm_subtitles = _normalize_for_contains(joined_subtitles)
-        norm_transcript = _normalize_for_contains(t.get("text", ""))
+        issues = detail.get("issues", [])
+        mismatch_type = "subtitle_misaligned_to_transcription"
+        if any(str(issue).startswith("NO_OVERLAPPING_TRANSCRIPTION") for issue in issues):
+            mismatch_type = "no_overlapping_transcription"
+        elif any(str(issue).startswith("EMPTY_SUBTITLE_TEXT") for issue in issues):
+            mismatch_type = "empty_subtitle_text"
+        elif any(str(issue).startswith("TEMPORAL_OFFSET") for issue in issues):
+            mismatch_type = "temporal_offset_detected"
 
-        # Contains-based check requested by product: transcription should appear in nearby subtitles.
-        if not norm_transcript or norm_transcript not in norm_subtitles:
-            mismatches.append({
-                "subtitle_text": joined_subtitles or "[no nearby subtitle text]",
-                "transcription_text": t.get("text", ""),
-                "start_time": t["start_time"],
-                "end_time": t["end_time"],
-                "severity": "medium",
-                "mismatch_type": "transcript_not_contained_in_subtitles",
-            })
+        time_range = detail.get("subtitle_time_seconds") or [0.0, 0.0]
+        start_time = _to_float(time_range[0], 0.0) if len(time_range) > 0 else 0.0
+        end_time = _to_float(time_range[1], start_time) if len(time_range) > 1 else start_time
+        matched_text = detail.get("matched_transcription_text") or "[no overlapping transcription]"
+        mismatches.append({
+            "subtitle_text": detail.get("subtitle_text", ""),
+            "transcription_text": matched_text,
+            "start_time": start_time,
+            "end_time": end_time,
+            "severity": "high",
+            "mismatch_type": mismatch_type,
+        })
 
     return mismatches
 
@@ -1645,6 +1878,29 @@ def analyze_video(request):
 
             filtered_subtitles = build_filtered_subtitles(classified)
             filtered_subtitle_ids = {d.get("detection_id") for d in filtered_subtitles if d.get("detection_id")}
+            transcriptions_for_sync: list[dict] = []
+            if project_id:
+                try:
+                    transcriptions_resp = (
+                        supabase.table("transcriptions")
+                        .select("text,start_time,end_time,speaker,confidence")
+                        .eq("project_id", project_id)
+                        .order("start_time", desc=False)
+                        .execute()
+                    )
+                    transcriptions_data = transcriptions_resp.data if hasattr(transcriptions_resp, "data") else []
+                    if isinstance(transcriptions_data, list):
+                        transcriptions_for_sync = transcriptions_data
+                except Exception as transcriptions_error:
+                    print(
+                        f"WARNING: could not load transcriptions for sync report (project_id={project_id}): {transcriptions_error}",
+                        flush=True,
+                    )
+            sync_report = build_sync_report(
+                subtitles=filtered_subtitles,
+                transcriptions=transcriptions_for_sync,
+                offset_window_seconds=1.5,
+            )
 
             spelling_input = [
                 {
@@ -1703,6 +1959,7 @@ def analyze_video(request):
                 "counts": counts,
                 "raw_detections": raw_detections,
                 "audit_rows": audit_rows,
+                "sync_report": sync_report,
             }, 200
 
         with tempfile.TemporaryDirectory() as tmp_dir:
