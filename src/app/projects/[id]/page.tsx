@@ -64,7 +64,9 @@ export default function ProjectDetailPage() {
       .from("text_detections")
       .select("*")
       .eq("project_id", projectId)
-      .order("start_time");
+      .order("start_time")
+      .order("end_time")
+      .order("bbox_top");
 
     if (detections) {
       const all = (detections as TextDetection[]).filter((d) => d.is_partial_sequence !== true);
@@ -80,7 +82,21 @@ export default function ProjectDetailPage() {
           d.is_subtitle &&
           (typeof d.confidence === "number" ? d.confidence : 0) >= MIN_SUBTITLE_CONFIDENCE &&
           !fixedTextSet.has(d.text.trim().toLowerCase())
-      );
+      ).sort((a, b) => {
+        const startDiff = a.start_time - b.start_time;
+        if (startDiff !== 0) return startDiff;
+
+        const endDiff = a.end_time - b.end_time;
+        if (endDiff !== 0) return endDiff;
+
+        const aTop = typeof a.bbox_top === "number" ? a.bbox_top : Number.POSITIVE_INFINITY;
+        const bTop = typeof b.bbox_top === "number" ? b.bbox_top : Number.POSITIVE_INFINITY;
+        if (aTop !== bTop) return aTop - bTop;
+
+        const aLeft = typeof a.bbox_left === "number" ? a.bbox_left : Number.POSITIVE_INFINITY;
+        const bLeft = typeof b.bbox_left === "number" ? b.bbox_left : Number.POSITIVE_INFINITY;
+        return aLeft - bLeft;
+      });
 
       setSubtitles(subs);
       setFixedTexts(fixed);
