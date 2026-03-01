@@ -1,9 +1,20 @@
 "use client";
 
-import { useRef, useEffect, useCallback, useMemo } from "react";
-import { Plyr, type APITypes, type PlyrSource, type PlyrOptions } from "plyr-react";
-import "plyr-react/plyr.css";
+import { useRef, useEffect, useCallback } from "react";
+import videojs from "video.js";
+import "video.js/dist/video-js.css";
 import { formatTimecode } from "@/lib/utils";
+import type { Mismatch, SpellingError } from "@/types/database";
+
+// Register markers plugin
+import "videojs-markers-plugin";
+import "videojs-markers-plugin/dist/videojs.markers.plugin.css";
+
+export interface VideoMarker {
+  time: number;
+  text: string;
+  class: string;
+}
 
 interface VideoPreviewProps {
   videoUrl: string | null;
@@ -13,79 +24,64 @@ interface VideoPreviewProps {
   onTimeUpdate: (time: number) => void;
   playing: boolean;
   onPlayPause: () => void;
+  mismatches?: Mismatch[];
+  spellingErrors?: SpellingError[];
+  onSeek?: (time: number) => void;
 }
 
 export default function VideoPreview({
   videoUrl,
   thumbnailUrl,
+  duration,
   currentTime,
   onTimeUpdate,
   playing,
   onPlayPause,
+  mismatches = [],
+  spellingErrors = [],
+  onSeek,
 }: VideoPreviewProps) {
-  const plyrRef = useRef<APITypes>(null);
+  const videoContainerRef = useRef<HTMLDivElement>(null);
+  const videoElementRef = useRef<HTMLVideoElement | null>(null);
+  const playerRef = useRef<ReturnType<typeof videojs> | null>(null);
+  const ignoreTimeUpdate = useRef(false);
 
-  const plyrSource: PlyrSource = useMemo(
-    () => ({
-      type: "video",
-      sources: videoUrl
-        ? [{ src: videoUrl, type: "video/mp4" }]
-        : [],
+  // Initialize video.js player
+  useEffect(() => {
+    if (!videoContainerRef.current || !videoUrl) return;
+
+    // Create video element
+    const videoEl = document.createElement("video");
+    videoEl.classList.add("video-js", "vjs-big-play-centered", "vjs-theme-custom");
+    videoContainerRef.current.appendChild(videoEl);
+    videoElementRef.current = videoEl;
+
+    const player = videojs(videoEl, {
+      controls: true,
+      fluid: true,
+      responsive: true,
+      preload: "auto",
       poster: thumbnailUrl || undefined,
-    }),
-    [videoUrl, thumbnailUrl]
-  );
+      sources: [{ src: videoUrl, type: "video/mp4" }],
+      controlBar: {
+        children: [
+          "playToggle",
+          "volumePanel",
+          "currentTimeDisplay",
+          "timeDivider",
+          "durationDisplay",
+          "progressControl",
+          "fullscreenToggle",
+        ],
+      },
+    });
 
-  const plyrOptions: PlyrOptions = useMemo(
-    () => ({
-      controls: [
-        "play-large",
-        "play",
-        "progress",
-        "current-time",
-        "duration",
-        "mute",
-        "volume",
-        "fullscreen",
-      ],
-      clickToPlay: true,
-      keyboard: { focused: true, global: false },
-      tooltips: { controls: true, seek: true },
-      invertTime: false,
-    }),
-    []
-  );
-
-  // Sync play/pause state from parent
-  useEffect(() => {
-    const player = plyrRef.current?.plyr;
-    if (!player || typeof player.play !== "function") return;
-
-    if (playing) {
-      player.play();
-    } else {
-      player.pause();
-    }
-  }, [playing]);
-
-  // Sync seeks from Timeline component
-  useEffect(() => {
-    const player = plyrRef.current?.plyr;
-    if (!player || typeof player.currentTime !== "number") return;
-    if (!Number.isFinite(currentTime) || currentTime < 0) return;
-
-    if (Math.abs(player.currentTime - currentTime) > 0.5) {
-      player.currentTime = currentTime;
-    }
-  }, [currentTime]);
-
-  // Listen to Plyr events for time updates and play state sync
-  const handleReady = useCallback(() => {
-    const player = plyrRef.current?.plyr;
-    if (!player || !player.on) return;
+    playerRef.current = player;
 
     player.on("timeupdate", () => {
-      onTimeUpdate(player.currentTime);
+      if (!ignoreTimeUpdate.current) {
+        onTimeUpdate(player.currentTime() || 0);
+      }
     });
 
     player.on("play", () => {
@@ -95,12 +91,98 @@ export default function VideoPreview({
     player.on("pause", () => {
       if (playing) onPlayPause();
     });
-  }, [onTimeUpdate, playing, onPlayPause]);
+
+    player.on("seeked", () => {
+      const t = player.currentTime() || 0;
+      onTimeUpdate(t);
+      if (onSeek) onSeek(t);
+    });
+
+    return () => {
+      if (playerRef.current) {
+        playerRef.current.dispose();
+        playerRef.current = null;
+      }
+    };
+    // Only re-init when videoUrl changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoUrl]);
+
+  // Sync play/pause from parent
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || player.isDisposed()) return;
+
+    if (playing && player.paused()) {
+      player.play()?.catch(() => {});
+    } else if (!playing && !player.paused()) {
+      player.pause();
+    }
+  }, [playing]);
+
+  // Sync external seeks (from Timeline markers click)
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || player.isDisposed()) return;
+    if (!Number.isFinite(currentTime) || currentTime < 0) return;
+
+    const playerTime = player.currentTime() || 0;
+    if (Math.abs(playerTime - currentTime) > 0.5) {
+      ignoreTimeUpdate.current = true;
+      player.currentTime(currentTime);
+      setTimeout(() => {
+        ignoreTimeUpdate.current = false;
+      }, 100);
+    }
+  }, [currentTime]);
+
+  // Add/update markers when mismatches or spelling errors change
+  const updateMarkers = useCallback(() => {
+    const player = playerRef.current;
+    if (!player || player.isDisposed()) return;
+
+    // Wait for player ready
+    player.ready(() => {
+      const p = player as ReturnType<typeof videojs> & {
+        markers?: (opts: unknown) => void;
+      };
+
+      const markers: VideoMarker[] = [];
+
+      // Red markers for mismatches
+      mismatches.forEach((m) => {
+        markers.push({
+          time: m.start_time,
+          text: `Mismatch: "${m.subtitle_text?.slice(0, 30)}"`,
+          class: "vjs-marker-mismatch",
+        });
+      });
+
+      // Yellow markers for spelling errors
+      spellingErrors.forEach((e) => {
+        markers.push({
+          time: e.timestamp,
+          text: `Spelling: "${e.original_text}" → "${e.suggested_text}"`,
+          class: "vjs-marker-spelling",
+        });
+      });
+
+      if (typeof p.markers === "function") {
+        p.markers({
+          markerStyle: {},
+          markers,
+          markerTip: {
+            display: true,
+            text: (marker: VideoMarker) => marker.text,
+          },
+        });
+      }
+    });
+  }, [mismatches, spellingErrors]);
 
   useEffect(() => {
-    const timer = setTimeout(handleReady, 500);
-    return () => clearTimeout(timer);
-  }, [handleReady, videoUrl]);
+    updateMarkers();
+  }, [updateMarkers]);
 
   return (
     <div className="flex flex-col">
@@ -111,19 +193,27 @@ export default function VideoPreview({
           </h2>
         </div>
         <div className="flex gap-2">
+          {mismatches.length > 0 && (
+            <span className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-rose-500/10 text-[10px] font-bold text-rose-500 uppercase">
+              <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+              {mismatches.length} Mismatch{mismatches.length !== 1 ? "es" : ""}
+            </span>
+          )}
+          {spellingErrors.length > 0 && (
+            <span className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-amber-500/10 text-[10px] font-bold text-amber-500 uppercase">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+              {spellingErrors.length} Spelling
+            </span>
+          )}
           <span className="px-2 py-1 rounded-md bg-slate-100 dark:bg-slate-800 text-[10px] font-mono text-slate-500 uppercase">
             {formatTimecode(currentTime)}
           </span>
         </div>
       </div>
 
-      <div className="mx-auto w-full max-w-[760px] plyr-container">
+      <div className="mx-auto w-full max-w-[760px] vjs-container">
         {videoUrl ? (
-          <Plyr
-            ref={plyrRef}
-            source={plyrSource}
-            options={plyrOptions}
-          />
+          <div ref={videoContainerRef} />
         ) : thumbnailUrl ? (
           <div className="bg-black rounded-2xl overflow-hidden border border-slate-800">
             <div className="relative bg-black h-[220px] sm:h-[280px] md:h-[360px] lg:h-[405px]">

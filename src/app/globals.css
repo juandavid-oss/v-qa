@@ -109,14 +109,43 @@
   box-shadow: 0 0 50px -12px rgba(139, 92, 246, 0.25);
 }
 
-/* Plyr theme overrides */
-.plyr-container {
-  --plyr-color-main: #8B5CF6;
-  --plyr-video-background: #000;
-  --plyr-control-radius: 8px;
-}
-.plyr-container .plyr {
+/* Video.js custom theme */
+.vjs-container .video-js {
   border-radius: 16px;
   overflow: hidden;
   border: 1px solid #1e293b;
+}
+.vjs-container .video-js .vjs-control-bar {
+  background: rgba(0, 0, 0, 0.7);
+  border-radius: 0 0 16px 16px;
+}
+.vjs-container .video-js .vjs-play-progress,
+.vjs-container .video-js .vjs-volume-level {
+  background: #8B5CF6;
+}
+.vjs-container .video-js .vjs-big-play-button {
+  background: rgba(139, 92, 246, 0.85);
+  border: none;
+  border-radius: 50%;
+  width: 64px;
+  height: 64px;
+  line-height: 64px;
+  font-size: 28px;
+}
+.vjs-container .video-js:hover .vjs-big-play-button {
+  background: rgba(139, 92, 246, 1);
+}
+
+/* Video.js marker styles */
+.vjs-marker-mismatch {
+  background-color: #ef4444 !important;
+  width: 6px !important;
+  border-radius: 2px;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);
+}
+.vjs-marker-spelling {
+  background-color: #f59e0b !important;
+  width: 6px !important;
+  border-radius: 2px;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.6);
 }

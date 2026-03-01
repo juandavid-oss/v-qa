@@ -4,7 +4,6 @@ import type { TextDetection } from "@/types/database";
 
 interface BrandNamesPanelProps {
   fixedTexts: TextDetection[];
-  totalDetections: number;
 }
 
 interface BrandCount {
@@ -12,7 +11,7 @@ interface BrandCount {
   count: number;
 }
 
-export default function BrandNamesPanel({ fixedTexts, totalDetections }: BrandNamesPanelProps) {
+export default function BrandNamesPanel({ fixedTexts }: BrandNamesPanelProps) {
   // Group fixed texts by their text content and count occurrences
   const brandCounts: BrandCount[] = [];
   const seen = new Map<string, number>();
@@ -26,10 +25,6 @@ export default function BrandNamesPanel({ fixedTexts, totalDetections }: BrandNa
     }
   }
   brandCounts.sort((a, b) => b.count - a.count);
-
-  const coverage = totalDetections > 0
-    ? Math.round(((totalDetections - fixedTexts.length) / totalDetections) * 100)
-    : 0;
 
   return (
     <div className="bg-surface-light dark:bg-surface-dark rounded-2xl border border-slate-200 dark:border-slate-800 p-6">
@@ -72,15 +67,6 @@ export default function BrandNamesPanel({ fixedTexts, totalDetections }: BrandNa
         )}
       </div>
 
-      <div className="mt-8 pt-6 border-t border-slate-200 dark:border-slate-800">
-        <div className="flex items-center justify-between text-xs text-slate-500 mb-2 uppercase font-bold tracking-tight">
-          <span>Analysis Coverage</span>
-          <span>{coverage}%</span>
-        </div>
-        <div className="w-full h-1.5 bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden">
-          <div className="bg-primary h-full" style={{ width: `${coverage}%` }} />
-        </div>
-      </div>
     </div>
   );
 }

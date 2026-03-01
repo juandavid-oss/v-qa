@@ -10,7 +10,7 @@ import Navbar from "@/components/layout/Navbar";
 import Footer from "@/components/layout/Footer";
 import SubtitlesPanel from "@/components/dashboard/SubtitlesPanel";
 import VideoPreview from "@/components/dashboard/VideoPreview";
-import Timeline from "@/components/dashboard/Timeline";
+
 import TranscriptionPanel from "@/components/dashboard/TranscriptionPanel";
 import SpellingPanel from "@/components/dashboard/SpellingPanel";
 import BrandNamesPanel from "@/components/dashboard/BrandNamesPanel";
@@ -273,23 +273,10 @@ export default function ProjectDetailPage() {
               onTimeUpdate={handleTimeUpdate}
               playing={playing}
               onPlayPause={() => setPlaying(!playing)}
-            />
-            <Timeline
-              duration={duration}
-              currentTime={currentTime}
               mismatches={mismatches}
+              spellingErrors={spellingErrors}
               onSeek={handleSeek}
             />
-
-            {/* Mismatch indicator */}
-            {mismatches.length > 0 && (
-              <div className="flex items-center gap-1.5 mt-1">
-                <span className="w-2 h-2 rounded-full bg-rose-500" />
-                <span className="text-[10px] font-bold text-rose-500 uppercase tracking-wider">
-                  {mismatches.length} Mismatch{mismatches.length !== 1 ? "es" : ""} Detected
-                </span>
-              </div>
-            )}
           </div>
 
           {/* Transcription - Right */}
