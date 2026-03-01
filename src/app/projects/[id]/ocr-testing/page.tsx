@@ -569,6 +569,71 @@ export default function OcrTestingPage() {
               </div>
             </section>
 
+            {result.sync_report && (
+              <section className="bg-surface-light dark:bg-surface-dark rounded-2xl border border-slate-200 dark:border-slate-800 p-6">
+                <h2 className="text-lg font-display font-bold mb-4">Sync Report</h2>
+                <div className="grid grid-cols-2 md:grid-cols-7 gap-3 text-sm mb-4">
+                  <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Total: <b>{result.sync_report.summary.total_subtitles}</b></div>
+                  <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Synced: <b>{result.sync_report.summary.synced}</b></div>
+                  <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Likely: <b>{result.sync_report.summary.likely_synced}</b></div>
+                  <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Misaligned: <b>{result.sync_report.summary.misaligned}</b></div>
+                  <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Duplicates: <b>{result.sync_report.summary.duplicates_found}</b></div>
+                  <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Avg overlap: <b>{result.sync_report.summary.avg_word_overlap_ratio.toFixed(3)}</b></div>
+                  <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Overall: <b>{result.sync_report.summary.overall_sync_status}</b></div>
+                </div>
+
+                <div className="overflow-auto max-h-[360px]">
+                  <table className="min-w-full text-sm">
+                    <thead className="text-left text-xs uppercase text-slate-500">
+                      <tr>
+                        <th className="py-2 pr-4">#</th>
+                        <th className="py-2 pr-4">Time</th>
+                        <th className="py-2 pr-4">Status</th>
+                        <th className="py-2 pr-4">Overlap</th>
+                        <th className="py-2 pr-4">Edit Dist</th>
+                        <th className="py-2 pr-4">Subtitle</th>
+                        <th className="py-2 pr-4">Matched ASR</th>
+                        <th className="py-2">Issues</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {result.sync_report.details.map((detail) => (
+                        <tr key={`sync_${detail.subtitle_index}`} className="border-t border-slate-200 dark:border-slate-800">
+                          <td className="py-2 pr-4 font-mono text-xs">{detail.subtitle_index + 1}</td>
+                          <td className="py-2 pr-4 font-mono text-xs">
+                            {formatTimecode(detail.subtitle_time_seconds[0])} - {formatTimecode(detail.subtitle_time_seconds[1])}
+                          </td>
+                          <td className="py-2 pr-4">{detail.status}</td>
+                          <td className="py-2 pr-4">{detail.word_overlap_ratio.toFixed(3)}</td>
+                          <td className="py-2 pr-4">{detail.edit_distance}</td>
+                          <td className="py-2 pr-4">{detail.subtitle_text}</td>
+                          <td className="py-2 pr-4">{detail.matched_transcription_text || "-"}</td>
+                          <td className="py-2">{detail.issues.length > 0 ? detail.issues.join(" | ") : "-"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {result.sync_report.duplicates.length > 0 && (
+                  <div className="mt-4">
+                    <h3 className="text-sm font-semibold mb-2">Duplicate Overlaps</h3>
+                    <div className="space-y-2 text-sm">
+                      {result.sync_report.duplicates.map((duplicate, idx) => (
+                        <div key={`dup_${idx}`} className="rounded-xl bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800 px-3 py-2">
+                          <div className="font-mono text-xs text-slate-500 mb-1">
+                            {formatTimecode(duplicate.overlapping_time_seconds[0])} - {formatTimecode(duplicate.overlapping_time_seconds[1])}
+                          </div>
+                          <div>Indices: {duplicate.subtitle_indices[0] + 1}, {duplicate.subtitle_indices[1] + 1}</div>
+                          <div>Texts: "{duplicate.texts[0]}" / "{duplicate.texts[1]}"</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </section>
+            )}
+
             <section className="bg-surface-light dark:bg-surface-dark rounded-2xl border border-slate-200 dark:border-slate-800 p-6">
               <h2 className="text-lg font-display font-bold mb-2">OCR Classification Audit</h2>
               <p className="text-xs text-slate-500 mb-4">
