@@ -83,19 +83,29 @@ export default function ProjectDetailPage() {
           (typeof d.confidence === "number" ? d.confidence : 0) >= MIN_SUBTITLE_CONFIDENCE &&
           !fixedTextSet.has(d.text.trim().toLowerCase())
       ).sort((a, b) => {
+        const aTop = typeof a.bbox_top === "number" ? a.bbox_top : Number.POSITIVE_INFINITY;
+        const bTop = typeof b.bbox_top === "number" ? b.bbox_top : Number.POSITIVE_INFINITY;
+        const aLeft = typeof a.bbox_left === "number" ? a.bbox_left : Number.POSITIVE_INFINITY;
+        const bLeft = typeof b.bbox_left === "number" ? b.bbox_left : Number.POSITIVE_INFINITY;
+
+        const startsClose = Math.abs(a.start_time - b.start_time) <= 0.35;
+        const endsClose = Math.abs(a.end_time - b.end_time) <= 0.35;
+        const isVisuallySimultaneous = startsClose && endsClose;
+
+        if (isVisuallySimultaneous) {
+          if (aTop !== bTop) return aTop - bTop;
+          if (aLeft !== bLeft) return aLeft - bLeft;
+        }
+
         const startDiff = a.start_time - b.start_time;
         if (startDiff !== 0) return startDiff;
-
         const endDiff = a.end_time - b.end_time;
         if (endDiff !== 0) return endDiff;
 
-        const aTop = typeof a.bbox_top === "number" ? a.bbox_top : Number.POSITIVE_INFINITY;
-        const bTop = typeof b.bbox_top === "number" ? b.bbox_top : Number.POSITIVE_INFINITY;
         if (aTop !== bTop) return aTop - bTop;
+        if (aLeft !== bLeft) return aLeft - bLeft;
 
-        const aLeft = typeof a.bbox_left === "number" ? a.bbox_left : Number.POSITIVE_INFINITY;
-        const bLeft = typeof b.bbox_left === "number" ? b.bbox_left : Number.POSITIVE_INFINITY;
-        return aLeft - bLeft;
+        return a.text.localeCompare(b.text);
       });
 
       setSubtitles(subs);

@@ -19,6 +19,12 @@ interface OcrDetection {
   is_fixed_text?: boolean;
   is_partial_sequence?: boolean;
   semantic_tags?: string[];
+  bbox?: {
+    top?: number;
+    left?: number;
+    bottom?: number;
+    right?: number;
+  };
 }
 
 interface OcrAuditRow {
@@ -27,6 +33,8 @@ interface OcrAuditRow {
   text: string;
   start_time: number;
   end_time: number;
+  bbox_top?: number | null;
+  bbox_left?: number | null;
   confidence?: number;
   repeat_count?: number;
   score_subtitle?: number;
@@ -112,6 +120,13 @@ const EMPTY_COUNTS: OcrTestResponse["counts"] = {
 };
 const MIN_SUBTITLE_CONFIDENCE = 0.9;
 
+function detectionSortKey(text: string | undefined, start: number | undefined, end: number | undefined): string {
+  const safeText = (text ?? "").trim().toLowerCase();
+  const safeStart = Number(start ?? 0).toFixed(3);
+  const safeEnd = Number(end ?? 0).toFixed(3);
+  return `${safeText}|${safeStart}|${safeEnd}`;
+}
+
 function getDetectionKey(d: OcrDetection) {
   return `${d.text}|${d.start_time}|${d.end_time}`;
 }
@@ -168,6 +183,8 @@ function buildFallbackAuditRows(payload: LegacyOcrTestResponse): OcrAuditRow[] {
       text: d.text ?? "",
       start_time: d.start_time ?? 0,
       end_time: d.end_time ?? 0,
+      bbox_top: typeof d.bbox?.top === "number" ? d.bbox.top : null,
+      bbox_left: typeof d.bbox?.left === "number" ? d.bbox.left : null,
       confidence: d.confidence,
       repeat_count: 0,
       score_subtitle: 0,
@@ -189,10 +206,28 @@ function buildFallbackAuditRows(payload: LegacyOcrTestResponse): OcrAuditRow[] {
 
 function normalizeAndSortAuditRows(rows: OcrAuditRow[]): OcrAuditRow[] {
   const sorted = [...rows].sort((a, b) => {
+    const aTop = typeof a.bbox_top === "number" ? a.bbox_top : Number.POSITIVE_INFINITY;
+    const bTop = typeof b.bbox_top === "number" ? b.bbox_top : Number.POSITIVE_INFINITY;
+    const aLeft = typeof a.bbox_left === "number" ? a.bbox_left : Number.POSITIVE_INFINITY;
+    const bLeft = typeof b.bbox_left === "number" ? b.bbox_left : Number.POSITIVE_INFINITY;
+
+    const startsClose = Math.abs((a.start_time ?? 0) - (b.start_time ?? 0)) <= 0.35;
+    const endsClose = Math.abs((a.end_time ?? 0) - (b.end_time ?? 0)) <= 0.35;
+    const isVisuallySimultaneous = startsClose && endsClose;
+
+    if (isVisuallySimultaneous) {
+      if (aTop !== bTop) return aTop - bTop;
+      if (aLeft !== bLeft) return aLeft - bLeft;
+    }
+
     const byStart = (a.start_time ?? 0) - (b.start_time ?? 0);
     if (byStart !== 0) return byStart;
     const byEnd = (a.end_time ?? 0) - (b.end_time ?? 0);
     if (byEnd !== 0) return byEnd;
+
+    if (aTop !== bTop) return aTop - bTop;
+    if (aLeft !== bLeft) return aLeft - bLeft;
+
     return (a.text ?? "").localeCompare(b.text ?? "");
   });
 
@@ -238,11 +273,34 @@ function normalizeAndSortAuditRows(rows: OcrAuditRow[]): OcrAuditRow[] {
 
 function normalizeOcrTestResponse(payload: LegacyOcrTestResponse): OcrTestResponse {
   const rawDetections = Array.isArray(payload.raw_detections) ? payload.raw_detections : [];
+  const fallbackPositionByKey = new Map<string, { bbox_top: number | null; bbox_left: number | null }>();
+  rawDetections.forEach((det) => {
+    const key = detectionSortKey(det.text, det.start_time, det.end_time);
+    if (fallbackPositionByKey.has(key)) return;
+    fallbackPositionByKey.set(key, {
+      bbox_top: typeof det.bbox?.top === "number" ? det.bbox.top : null,
+      bbox_left: typeof det.bbox?.left === "number" ? det.bbox.left : null,
+    });
+  });
+
   const auditRowsBase =
     Array.isArray(payload.audit_rows) && payload.audit_rows.length > 0
       ? payload.audit_rows
       : buildFallbackAuditRows(payload);
-  const auditRows = normalizeAndSortAuditRows(auditRowsBase);
+  const auditRowsWithFallbackPosition = auditRowsBase.map((row) => {
+    if (typeof row.bbox_top === "number" || typeof row.bbox_left === "number") {
+      return row;
+    }
+    const key = detectionSortKey(row.text, row.start_time, row.end_time);
+    const fallbackPosition = fallbackPositionByKey.get(key);
+    if (!fallbackPosition) return row;
+    return {
+      ...row,
+      bbox_top: fallbackPosition.bbox_top,
+      bbox_left: fallbackPosition.bbox_left,
+    };
+  });
+  const auditRows = normalizeAndSortAuditRows(auditRowsWithFallbackPosition);
 
   return {
     status: payload.status ?? "ok",
@@ -394,6 +452,32 @@ export default function OcrTestingPage() {
               <span className="material-symbols-outlined text-base">arrow_back</span>
               Back to detail
             </Link>
+            {project.ocr_raw_storage_path ? (
+              <a
+                href={`/api/projects/${project.id}/ocr-raw/download`}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+              >
+                <span className="material-symbols-outlined text-base">download</span>
+                Download RAW OCR
+              </a>
+            ) : (
+              <button
+                type="button"
+                disabled
+                title="RAW OCR not available yet. Run analysis first."
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-medium text-slate-400 cursor-not-allowed"
+              >
+                <span className="material-symbols-outlined text-base">download</span>
+                Download RAW OCR
+              </button>
+            )}
+            <a
+              href={`/api/projects/${project.id}/transcription/download`}
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            >
+              <span className="material-symbols-outlined text-base">download</span>
+              Download Transcription
+            </a>
             <button
               type="button"
               onClick={runTesting}

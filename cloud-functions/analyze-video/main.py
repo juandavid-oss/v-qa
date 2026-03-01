@@ -1509,6 +1509,8 @@ def build_testing_audit_rows(
             "text": text,
             "start_time": det.get("start_time", 0),
             "end_time": det.get("end_time", 0),
+            "bbox_top": (det.get("bbox") or {}).get("top"),
+            "bbox_left": (det.get("bbox") or {}).get("left"),
             "confidence": det.get("confidence"),
             "repeat_count": int(det.get("repeat_count", 0) or 0),
             "score_subtitle": int(det.get("score_subtitle", 0) or 0),
