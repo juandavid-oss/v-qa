@@ -21,6 +21,35 @@ interface OcrDetection {
   semantic_tags?: string[];
 }
 
+interface OcrAuditRow {
+  order: number;
+  detection_id: string;
+  text: string;
+  start_time: number;
+  end_time: number;
+  confidence?: number;
+  structural_classification: "subtitle" | "fixed" | "sequential" | "unknown";
+  semantic_tags: string[];
+  included_in_final_subtitles: boolean;
+  checked_in_spelling: boolean;
+  subtitle_filter_reason: string;
+  spelling_status: "not_checked" | "no_error" | "error_detected" | "error_filtered_out";
+  spelling_raw_match_count: number;
+  spelling_kept_match_count: number;
+  spelling_raw_matches: Array<{
+    original_text: string;
+    suggested_text: string;
+    rule_id: string;
+    has_replacement: boolean;
+  }>;
+  spelling_kept_matches: Array<{
+    original_text: string;
+    suggested_text: string;
+    rule_id: string;
+    has_replacement: boolean;
+  }>;
+}
+
 interface OcrTestResponse {
   status: string;
   mode: string;
@@ -33,18 +62,44 @@ interface OcrTestResponse {
     filtered_subtitles: number;
     brand_name: number;
     proper_name: number;
+    spelling_checked: number;
+    spelling_raw_matches: number;
+    spelling_kept_matches: number;
+    spelling_with_error: number;
+    spelling_filtered_out: number;
+    spelling_no_error: number;
   };
-  raw_response: unknown;
   raw_detections: OcrDetection[];
-  classified_detections: OcrDetection[];
-  filtered_subtitles: OcrDetection[];
+  audit_rows: OcrAuditRow[];
 }
 
-function classifyLabel(detection: OcrDetection) {
-  if (detection.is_partial_sequence) return "sequential";
-  if (detection.is_fixed_text) return "fixed";
-  if (detection.is_subtitle) return "subtitle";
-  return "unknown";
+function subtitleFilterReasonLabel(reason: string) {
+  switch (reason) {
+    case "included_in_final_subtitles":
+      return "Included";
+    case "excluded_partial_sequence":
+      return "Excluded (partial sequence)";
+    case "excluded_not_subtitle":
+      return "Excluded (not subtitle)";
+    case "excluded_matches_fixed_text":
+      return "Excluded (matches fixed text)";
+    default:
+      return reason;
+  }
+}
+
+function spellingStatusLabel(status: OcrAuditRow["spelling_status"]) {
+  switch (status) {
+    case "error_detected":
+      return "Error detected";
+    case "error_filtered_out":
+      return "Error filtered";
+    case "no_error":
+      return "No error";
+    case "not_checked":
+    default:
+      return "Not checked";
+  }
 }
 
 export default function OcrTestingPage() {
@@ -196,43 +251,60 @@ export default function OcrTestingPage() {
                 <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Filtered subs: <b>{result.counts.filtered_subtitles}</b></div>
                 <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Brand tags: <b>{result.counts.brand_name}</b></div>
                 <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Proper-name tags: <b>{result.counts.proper_name}</b></div>
+                <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Spell checked: <b>{result.counts.spelling_checked}</b></div>
+                <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Spell raw matches: <b>{result.counts.spelling_raw_matches}</b></div>
+                <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Spell kept: <b>{result.counts.spelling_kept_matches}</b></div>
+                <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Rows with error: <b>{result.counts.spelling_with_error}</b></div>
+                <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Rows filtered: <b>{result.counts.spelling_filtered_out}</b></div>
+                <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Rows no error: <b>{result.counts.spelling_no_error}</b></div>
               </div>
             </section>
 
             <section className="bg-surface-light dark:bg-surface-dark rounded-2xl border border-slate-200 dark:border-slate-800 p-6">
-              <h2 className="text-lg font-display font-bold mb-4">Google VI Raw Payload</h2>
-              <pre className="text-xs bg-slate-900 text-slate-100 rounded-xl p-4 overflow-auto max-h-[460px]">
-                {JSON.stringify(result.raw_response, null, 2)}
-              </pre>
-            </section>
-
-            <section className="bg-surface-light dark:bg-surface-dark rounded-2xl border border-slate-200 dark:border-slate-800 p-6">
-              <h2 className="text-lg font-display font-bold mb-4">Classified Detections</h2>
+              <h2 className="text-lg font-display font-bold mb-2">OCR Classification Audit</h2>
+              <p className="text-xs text-slate-500 mb-4">
+                Every OCR text in appearance order, with structural classification, semantic tags, subtitle filter decision and spelling decision.
+              </p>
               <div className="overflow-auto max-h-[460px]">
                 <table className="min-w-full text-sm">
                   <thead className="text-left text-xs uppercase text-slate-500">
                     <tr>
+                      <th className="py-2 pr-4">#</th>
                       <th className="py-2 pr-4">Type</th>
                       <th className="py-2 pr-4">Semantic</th>
+                      <th className="py-2 pr-4">Subtitle filter</th>
+                      <th className="py-2 pr-4">Spelling</th>
                       <th className="py-2 pr-4">Time</th>
                       <th className="py-2 pr-4">Confidence</th>
                       <th className="py-2">Text</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {result.classified_detections.map((detection, index) => (
-                      <tr key={`${detection.text}-${detection.start_time}-${index}`} className="border-t border-slate-200 dark:border-slate-800">
-                        <td className="py-2 pr-4 font-medium">{classifyLabel(detection)}</td>
+                    {result.audit_rows.map((row) => (
+                      <tr key={row.detection_id} className="border-t border-slate-200 dark:border-slate-800">
+                        <td className="py-2 pr-4 font-mono text-xs">{row.order}</td>
+                        <td className="py-2 pr-4 font-medium">{row.structural_classification}</td>
                         <td className="py-2 pr-4">
-                          {(detection.semantic_tags ?? []).length > 0
-                            ? (detection.semantic_tags ?? []).join(", ")
+                          {(row.semantic_tags ?? []).length > 0
+                            ? (row.semantic_tags ?? []).join(", ")
                             : "-"}
                         </td>
-                        <td className="py-2 pr-4 font-mono text-xs">
-                          {formatTimecode(detection.start_time)} - {formatTimecode(detection.end_time)}
+                        <td className="py-2 pr-4 text-xs">
+                          {subtitleFilterReasonLabel(row.subtitle_filter_reason)}
                         </td>
-                        <td className="py-2 pr-4">{typeof detection.confidence === "number" ? detection.confidence.toFixed(2) : "-"}</td>
-                        <td className="py-2">{detection.text}</td>
+                        <td className="py-2 pr-4 text-xs">
+                          <div>{spellingStatusLabel(row.spelling_status)}</div>
+                          {row.spelling_raw_match_count > 0 && (
+                            <div className="text-[10px] text-slate-500">
+                              raw:{row.spelling_raw_match_count} kept:{row.spelling_kept_match_count}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-2 pr-4 font-mono text-xs">
+                          {formatTimecode(row.start_time)} - {formatTimecode(row.end_time)}
+                        </td>
+                        <td className="py-2 pr-4">{typeof row.confidence === "number" ? row.confidence.toFixed(2) : "-"}</td>
+                        <td className="py-2">{row.text}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -243,9 +315,9 @@ export default function OcrTestingPage() {
             <section className="bg-surface-light dark:bg-surface-dark rounded-2xl border border-slate-200 dark:border-slate-800 p-6">
               <h2 className="text-lg font-display font-bold mb-4">Filtered Subtitle Output</h2>
               <div className="space-y-3 max-h-[320px] overflow-auto">
-                {result.filtered_subtitles.map((subtitle, index) => (
+                {result.audit_rows.filter((row) => row.included_in_final_subtitles).map((subtitle) => (
                   <div
-                    key={`${subtitle.text}-${subtitle.start_time}-${index}`}
+                    key={subtitle.detection_id}
                     className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800"
                   >
                     <div className="text-[10px] uppercase font-mono text-slate-500 mb-1">
@@ -254,7 +326,7 @@ export default function OcrTestingPage() {
                     <p className="text-sm">{subtitle.text}</p>
                   </div>
                 ))}
-                {result.filtered_subtitles.length === 0 && (
+                {result.audit_rows.filter((row) => row.included_in_final_subtitles).length === 0 && (
                   <p className="text-sm text-slate-500">No filtered subtitles generated.</p>
                 )}
               </div>
@@ -262,7 +334,7 @@ export default function OcrTestingPage() {
           </>
         ) : (
           <div className="bg-surface-light dark:bg-surface-dark rounded-2xl border border-slate-200 dark:border-slate-800 p-6 text-sm text-slate-500">
-            Run OCR testing to inspect raw payload and current classification output.
+            Run OCR testing to inspect OCR text flow, filtering decisions and spelling decisions.
           </div>
         )}
       </main>

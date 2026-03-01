@@ -883,6 +883,7 @@ def check_spelling(texts: list[dict]) -> list[dict]:
     for item in texts:
         text = item["text"]
         timestamp = item.get("start_time", 0)
+        detection_id = item.get("detection_id")
 
         response = requests.post(
             LANGUAGETOOL_URL,
@@ -908,6 +909,7 @@ def check_spelling(texts: list[dict]) -> list[dict]:
                 "suggested_text": suggested,
                 "context": context,
                 "timestamp": timestamp,
+                "detection_id": detection_id,
                 "rule_id": match.get("rule", {}).get("id", ""),
                 "source": "subtitle",
                 "has_replacement": bool(replacements),
@@ -1240,6 +1242,85 @@ def classify_semantic_tags(detections: list[dict]) -> list[dict]:
     return detections
 
 
+def structural_classification(det: dict) -> str:
+    if det.get("is_partial_sequence"):
+        return "sequential"
+    if det.get("is_fixed_text"):
+        return "fixed"
+    if det.get("is_subtitle"):
+        return "subtitle"
+    return "unknown"
+
+
+def _serialize_spelling_items(items: list[dict]) -> list[dict]:
+    serialized: list[dict] = []
+    for item in items:
+        serialized.append({
+            "original_text": item.get("original_text"),
+            "suggested_text": item.get("suggested_text"),
+            "rule_id": item.get("rule_id"),
+            "has_replacement": bool(item.get("has_replacement", True)),
+        })
+    return serialized
+
+
+def build_testing_audit_rows(
+    detections: list[dict],
+    filtered_subtitle_ids: set[str],
+    spellcheck_checked_ids: set[str],
+    raw_spelling_by_detection_id: dict[str, list[dict]],
+    kept_spelling_by_detection_id: dict[str, list[dict]],
+) -> list[dict]:
+    rows: list[dict] = []
+    for idx, det in enumerate(detections, start=1):
+        detection_id = det.get("detection_id")
+        text = det.get("text", "")
+        is_in_filtered = detection_id in filtered_subtitle_ids
+        is_spellchecked = detection_id in spellcheck_checked_ids
+
+        if det.get("is_partial_sequence"):
+            subtitle_filter_reason = "excluded_partial_sequence"
+        elif not det.get("is_subtitle"):
+            subtitle_filter_reason = "excluded_not_subtitle"
+        elif not is_in_filtered:
+            subtitle_filter_reason = "excluded_matches_fixed_text"
+        else:
+            subtitle_filter_reason = "included_in_final_subtitles"
+
+        raw_spelling = raw_spelling_by_detection_id.get(detection_id, []) if detection_id else []
+        kept_spelling = kept_spelling_by_detection_id.get(detection_id, []) if detection_id else []
+
+        if not is_spellchecked:
+            spelling_status = "not_checked"
+        elif not raw_spelling:
+            spelling_status = "no_error"
+        elif kept_spelling:
+            spelling_status = "error_detected"
+        else:
+            spelling_status = "error_filtered_out"
+
+        rows.append({
+            "order": idx,
+            "detection_id": detection_id,
+            "text": text,
+            "start_time": det.get("start_time", 0),
+            "end_time": det.get("end_time", 0),
+            "confidence": det.get("confidence"),
+            "structural_classification": structural_classification(det),
+            "semantic_tags": det.get("semantic_tags", []),
+            "included_in_final_subtitles": is_in_filtered,
+            "checked_in_spelling": is_spellchecked,
+            "subtitle_filter_reason": subtitle_filter_reason,
+            "spelling_status": spelling_status,
+            "spelling_raw_match_count": len(raw_spelling),
+            "spelling_kept_match_count": len(kept_spelling),
+            "spelling_raw_matches": _serialize_spelling_items(raw_spelling),
+            "spelling_kept_matches": _serialize_spelling_items(kept_spelling),
+        })
+
+    return rows
+
+
 # --- Main Cloud Function Entry Point ---
 @functions_framework.http
 def analyze_video(request):
@@ -1287,7 +1368,45 @@ def analyze_video(request):
             inferred_duration = max((d.get("end_time", 0) for d in merged), default=0.0)
             classified = classify_subtitle_vs_fixed(merged, inferred_duration)
             classified = classify_semantic_tags(classified)
+
+            for index, det in enumerate(classified):
+                det["detection_id"] = f"det_{index:04d}"
+
             filtered_subtitles = build_filtered_subtitles(classified)
+            filtered_subtitle_ids = {d.get("detection_id") for d in filtered_subtitles if d.get("detection_id")}
+
+            spelling_input = [
+                {
+                    "detection_id": d["detection_id"],
+                    "text": d["text"],
+                    "start_time": d["start_time"],
+                }
+                for d in classified
+                if d.get("is_subtitle") and not d.get("is_partial_sequence")
+            ]
+            spellcheck_checked_ids = {d["detection_id"] for d in spelling_input}
+            raw_spelling_errors = check_spelling(spelling_input)
+            filtered_spelling_errors = filter_false_positives(raw_spelling_errors, classified)
+
+            raw_spelling_by_detection_id: dict[str, list[dict]] = {}
+            for error in raw_spelling_errors:
+                detection_id = error.get("detection_id")
+                if detection_id:
+                    raw_spelling_by_detection_id.setdefault(detection_id, []).append(error)
+
+            kept_spelling_by_detection_id: dict[str, list[dict]] = {}
+            for error in filtered_spelling_errors:
+                detection_id = error.get("detection_id")
+                if detection_id:
+                    kept_spelling_by_detection_id.setdefault(detection_id, []).append(error)
+
+            audit_rows = build_testing_audit_rows(
+                classified,
+                filtered_subtitle_ids,
+                spellcheck_checked_ids,
+                raw_spelling_by_detection_id,
+                kept_spelling_by_detection_id,
+            )
 
             counts = {
                 "raw": len(raw_detections),
@@ -1298,16 +1417,20 @@ def analyze_video(request):
                 "filtered_subtitles": len(filtered_subtitles),
                 "brand_name": sum(1 for d in classified if "brand_name" in (d.get("semantic_tags") or [])),
                 "proper_name": sum(1 for d in classified if "proper_name" in (d.get("semantic_tags") or [])),
+                "spelling_checked": len(spelling_input),
+                "spelling_raw_matches": len(raw_spelling_errors),
+                "spelling_kept_matches": len(filtered_spelling_errors),
+                "spelling_with_error": sum(1 for row in audit_rows if row.get("spelling_status") == "error_detected"),
+                "spelling_filtered_out": sum(1 for row in audit_rows if row.get("spelling_status") == "error_filtered_out"),
+                "spelling_no_error": sum(1 for row in audit_rows if row.get("spelling_status") == "no_error"),
             }
 
             return {
                 "status": "ok",
                 "mode": "classify_ocr_payload",
                 "counts": counts,
-                "raw_response": source_payload,
                 "raw_detections": raw_detections,
-                "classified_detections": classified,
-                "filtered_subtitles": filtered_subtitles,
+                "audit_rows": audit_rows,
             }, 200
 
         with tempfile.TemporaryDirectory() as tmp_dir:
