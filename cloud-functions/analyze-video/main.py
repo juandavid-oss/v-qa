@@ -906,10 +906,13 @@ def _is_typo_match(match: dict) -> bool:
     return False
 
 
-def check_spelling(texts: list[dict]) -> list[dict]:
+def check_spelling(
+    texts: list[dict],
+    debug_by_detection_id: dict[str, list[dict]] | None = None,
+) -> list[dict]:
     """Check per-word typos using LanguageTool API."""
     errors = []
-    token_cache: dict[str, list[dict]] = {}
+    token_cache: dict[str, dict] = {}
 
     for item in texts:
         text = item["text"]
@@ -921,24 +924,58 @@ def check_spelling(texts: list[dict]) -> list[dict]:
 
         for token, token_start, token_end in token_spans:
             cache_key = token.casefold()
-            matches = token_cache.get(cache_key)
+            cache_entry = token_cache.get(cache_key)
+            from_cache = cache_entry is not None
 
-            if matches is None:
+            if cache_entry is None:
                 response = requests.post(
                     LANGUAGETOOL_URL,
                     data={"text": token, "language": "auto"},
                     timeout=30,
                 )
                 if response.status_code != 200:
-                    token_cache[cache_key] = []
+                    cache_entry = {
+                        "status_code": response.status_code,
+                        "result": {},
+                        "typo_matches": [],
+                    }
+                    token_cache[cache_key] = cache_entry
+                    if debug_by_detection_id is not None and detection_id:
+                        debug_by_detection_id.setdefault(detection_id, []).append({
+                            "token": token,
+                            "from_cache": False,
+                            "status_code": response.status_code,
+                            "langtool_response": {},
+                            "typo_matches": [],
+                            "typo_match_count": 0,
+                        })
                     continue
 
                 result = response.json()
-                matches = [
+                typo_matches = [
                     m for m in result.get("matches", [])
                     if isinstance(m, dict) and _is_typo_match(m)
                 ]
-                token_cache[cache_key] = matches
+                cache_entry = {
+                    "status_code": response.status_code,
+                    "result": result,
+                    "typo_matches": typo_matches,
+                }
+                token_cache[cache_key] = cache_entry
+
+            matches = cache_entry.get("typo_matches", []) if isinstance(cache_entry, dict) else []
+            status_code = cache_entry.get("status_code", 200) if isinstance(cache_entry, dict) else 200
+            result_payload = cache_entry.get("result", {}) if isinstance(cache_entry, dict) else {}
+
+            if debug_by_detection_id is not None and detection_id:
+                debug_by_detection_id.setdefault(detection_id, []).append({
+                    "token": token,
+                    "from_cache": from_cache,
+                    "status_code": status_code,
+                    "langtool_response": result_payload,
+                    "typo_matches": matches,
+                    "typo_match_count": len(matches),
+                })
 
             if not matches:
                 continue
@@ -1318,6 +1355,7 @@ def build_testing_audit_rows(
     spellcheck_checked_ids: set[str],
     raw_spelling_by_detection_id: dict[str, list[dict]],
     kept_spelling_by_detection_id: dict[str, list[dict]],
+    spelling_debug_by_detection_id: dict[str, list[dict]],
 ) -> list[dict]:
     rows: list[dict] = []
     for idx, det in enumerate(detections, start=1):
@@ -1366,6 +1404,7 @@ def build_testing_audit_rows(
             "spelling_kept_match_count": len(kept_spelling),
             "spelling_raw_matches": _serialize_spelling_items(raw_spelling),
             "spelling_kept_matches": _serialize_spelling_items(kept_spelling),
+            "spelling_debug": spelling_debug_by_detection_id.get(detection_id, []) if detection_id else [],
         })
 
     return rows
@@ -1442,7 +1481,8 @@ def analyze_video(request):
                 for d in filtered_subtitles
             ]
             spellcheck_checked_ids = {d["detection_id"] for d in spelling_input}
-            raw_spelling_errors = check_spelling(spelling_input)
+            spelling_debug_by_detection_id: dict[str, list[dict]] = {}
+            raw_spelling_errors = check_spelling(spelling_input, spelling_debug_by_detection_id)
             filtered_spelling_errors = filter_false_positives(raw_spelling_errors, classified)
 
             raw_spelling_by_detection_id: dict[str, list[dict]] = {}
@@ -1463,6 +1503,7 @@ def analyze_video(request):
                 spellcheck_checked_ids,
                 raw_spelling_by_detection_id,
                 kept_spelling_by_detection_id,
+                spelling_debug_by_detection_id,
             )
 
             counts = {

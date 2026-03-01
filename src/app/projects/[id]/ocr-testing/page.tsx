@@ -48,6 +48,14 @@ interface OcrAuditRow {
     rule_id: string;
     has_replacement: boolean;
   }>;
+  spelling_debug?: Array<{
+    token: string;
+    from_cache: boolean;
+    status_code: number;
+    typo_match_count: number;
+    typo_matches: unknown[];
+    langtool_response: unknown;
+  }>;
 }
 
 interface OcrTestResponse {
@@ -182,7 +190,11 @@ function normalizeAndSortAuditRows(rows: OcrAuditRow[]): OcrAuditRow[] {
   });
 
   return sorted.map((row, index) => {
-    const normalizedIncluded = row.subtitle_filter_reason === "included_in_final_subtitles";
+    const confidenceEnough = hasEnoughSubtitleConfidence({ confidence: row.confidence });
+    const normalizedReason = row.subtitle_filter_reason === "included_in_final_subtitles" && !confidenceEnough
+      ? "excluded_low_confidence"
+      : row.subtitle_filter_reason;
+    const normalizedIncluded = normalizedReason === "included_in_final_subtitles";
     const checkedInSpelling = normalizedIncluded;
 
     let spellingStatus = row.spelling_status;
@@ -199,6 +211,7 @@ function normalizeAndSortAuditRows(rows: OcrAuditRow[]): OcrAuditRow[] {
     return {
       ...row,
       order: index + 1,
+      subtitle_filter_reason: normalizedReason,
       included_in_final_subtitles: normalizedIncluded,
       semantic_tags: Array.isArray(row.semantic_tags) ? row.semantic_tags : [],
       checked_in_spelling: checkedInSpelling,
@@ -207,6 +220,7 @@ function normalizeAndSortAuditRows(rows: OcrAuditRow[]): OcrAuditRow[] {
       spelling_kept_match_count: row.spelling_kept_match_count ?? 0,
       spelling_raw_matches: Array.isArray(row.spelling_raw_matches) ? row.spelling_raw_matches : [],
       spelling_kept_matches: Array.isArray(row.spelling_kept_matches) ? row.spelling_kept_matches : [],
+      spelling_debug: Array.isArray(row.spelling_debug) ? row.spelling_debug : [],
     };
   });
 }
@@ -438,6 +452,7 @@ export default function OcrTestingPage() {
                       <th className="py-2 pr-4">Semantic</th>
                       <th className="py-2 pr-4">Subtitle filter</th>
                       <th className="py-2 pr-4">Spelling</th>
+                      <th className="py-2 pr-4">LT JSON</th>
                       <th className="py-2 pr-4">Time</th>
                       <th className="py-2 pr-4">Confidence</th>
                       <th className="py-2">Text</th>
@@ -462,6 +477,20 @@ export default function OcrTestingPage() {
                             <div className="text-[10px] text-slate-500">
                               raw:{row.spelling_raw_match_count} kept:{row.spelling_kept_match_count}
                             </div>
+                          )}
+                        </td>
+                        <td className="py-2 pr-4 text-[11px]">
+                          {(row.spelling_debug ?? []).length > 0 ? (
+                            <details>
+                              <summary className="cursor-pointer text-primary">
+                                View ({row.spelling_debug?.length})
+                              </summary>
+                              <pre className="mt-2 max-w-[380px] max-h-[180px] overflow-auto rounded bg-slate-900 text-slate-100 p-2 text-[10px]">
+                                {JSON.stringify(row.spelling_debug, null, 2)}
+                              </pre>
+                            </details>
+                          ) : (
+                            <span className="text-slate-500">-</span>
                           )}
                         </td>
                         <td className="py-2 pr-4 font-mono text-xs">

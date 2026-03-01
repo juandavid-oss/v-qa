@@ -41,6 +41,7 @@ export default function ProjectDetailPage() {
 
   const fetchProjectData = useCallback(async () => {
     setLoading(true);
+    let subtitleWindows: Array<{ start: number; end: number }> = [];
 
     // Fetch project
     const { data: proj } = await supabase
@@ -83,6 +84,7 @@ export default function ProjectDetailPage() {
 
       setSubtitles(subs);
       setFixedTexts(fixed);
+      subtitleWindows = subs.map((s) => ({ start: s.start_time, end: s.end_time }));
     }
 
     // Fetch transcriptions
@@ -101,7 +103,13 @@ export default function ProjectDetailPage() {
       .eq("project_id", projectId)
       .order("timestamp");
 
-    if (errors) setSpellingErrors(errors as SpellingError[]);
+    if (errors) {
+      const allowed = (errors as SpellingError[]).filter((error) => {
+        if (subtitleWindows.length === 0) return true;
+        return subtitleWindows.some((w) => error.timestamp >= (w.start - 0.25) && error.timestamp <= (w.end + 0.25));
+      });
+      setSpellingErrors(allowed);
+    }
 
     // Fetch mismatches
     const { data: mm } = await supabase
