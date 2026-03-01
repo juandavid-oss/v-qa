@@ -1173,6 +1173,73 @@ def build_filtered_subtitles(detections: list[dict]) -> list[dict]:
     ]
 
 
+def _normalize_semantic_text(text: str) -> str:
+    value = (text or "").strip().lower()
+    value = re.sub(r"\s+", " ", value)
+    return value
+
+
+def _looks_like_proper_name(text: str) -> bool:
+    tokens = re.findall(r"[A-Za-z][A-Za-z'\-]*", text)
+    if len(tokens) < 2 or len(tokens) > 4:
+        return False
+    if not all(token[0].isupper() for token in tokens):
+        return False
+    # Avoid all-caps acronyms being treated as people names.
+    if any(token.isupper() and len(token) > 1 for token in tokens):
+        return False
+    return True
+
+
+def _looks_like_brand(text: str) -> bool:
+    letters_only = re.sub(r"[^A-Za-z]", "", text)
+    if len(letters_only) < 3:
+        return False
+    upper_ratio = sum(1 for ch in letters_only if ch.isupper()) / len(letters_only)
+    return upper_ratio >= 0.8
+
+
+def classify_semantic_tags(detections: list[dict]) -> list[dict]:
+    if not detections:
+        return detections
+
+    text_counts: dict[str, int] = {}
+    for det in detections:
+        norm = _normalize_semantic_text(det.get("text", ""))
+        if not norm:
+            continue
+        text_counts[norm] = text_counts.get(norm, 0) + 1
+
+    for det in detections:
+        text = det.get("text", "")
+        norm = _normalize_semantic_text(text)
+        repeats = text_counts.get(norm, 0)
+        tags: list[str] = []
+
+        if _looks_like_proper_name(text):
+            tags.append("proper_name")
+
+        if (
+            _looks_like_brand(text)
+            or (det.get("is_fixed_text") and repeats >= 2)
+            or (det.get("is_fixed_text") and len(text.split()) <= 3 and text[:1].isupper())
+        ):
+            tags.append("brand_name")
+
+        # de-duplicate preserving order
+        seen = set()
+        dedup_tags = []
+        for tag in tags:
+            if tag in seen:
+                continue
+            seen.add(tag)
+            dedup_tags.append(tag)
+
+        det["semantic_tags"] = dedup_tags
+
+    return detections
+
+
 # --- Main Cloud Function Entry Point ---
 @functions_framework.http
 def analyze_video(request):
@@ -1219,6 +1286,7 @@ def analyze_video(request):
             merged = merge_partial_sequences(raw_detections)
             inferred_duration = max((d.get("end_time", 0) for d in merged), default=0.0)
             classified = classify_subtitle_vs_fixed(merged, inferred_duration)
+            classified = classify_semantic_tags(classified)
             filtered_subtitles = build_filtered_subtitles(classified)
 
             counts = {
@@ -1228,6 +1296,8 @@ def analyze_video(request):
                 "fixed": sum(1 for d in classified if d.get("is_fixed_text")),
                 "partial": sum(1 for d in classified if d.get("is_partial_sequence")),
                 "filtered_subtitles": len(filtered_subtitles),
+                "brand_name": sum(1 for d in classified if "brand_name" in (d.get("semantic_tags") or [])),
+                "proper_name": sum(1 for d in classified if "proper_name" in (d.get("semantic_tags") or [])),
             }
 
             return {

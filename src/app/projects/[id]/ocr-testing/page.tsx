@@ -18,6 +18,7 @@ interface OcrDetection {
   is_subtitle?: boolean;
   is_fixed_text?: boolean;
   is_partial_sequence?: boolean;
+  semantic_tags?: string[];
 }
 
 interface OcrTestResponse {
@@ -30,6 +31,8 @@ interface OcrTestResponse {
     fixed: number;
     partial: number;
     filtered_subtitles: number;
+    brand_name: number;
+    proper_name: number;
   };
   raw_response: unknown;
   raw_detections: OcrDetection[];
@@ -191,6 +194,8 @@ export default function OcrTestingPage() {
                 <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Fixed: <b>{result.counts.fixed}</b></div>
                 <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Sequential: <b>{result.counts.partial}</b></div>
                 <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Filtered subs: <b>{result.counts.filtered_subtitles}</b></div>
+                <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Brand tags: <b>{result.counts.brand_name}</b></div>
+                <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Proper-name tags: <b>{result.counts.proper_name}</b></div>
               </div>
             </section>
 
@@ -208,6 +213,7 @@ export default function OcrTestingPage() {
                   <thead className="text-left text-xs uppercase text-slate-500">
                     <tr>
                       <th className="py-2 pr-4">Type</th>
+                      <th className="py-2 pr-4">Semantic</th>
                       <th className="py-2 pr-4">Time</th>
                       <th className="py-2 pr-4">Confidence</th>
                       <th className="py-2">Text</th>
@@ -217,6 +223,11 @@ export default function OcrTestingPage() {
                     {result.classified_detections.map((detection, index) => (
                       <tr key={`${detection.text}-${detection.start_time}-${index}`} className="border-t border-slate-200 dark:border-slate-800">
                         <td className="py-2 pr-4 font-medium">{classifyLabel(detection)}</td>
+                        <td className="py-2 pr-4">
+                          {(detection.semantic_tags ?? []).length > 0
+                            ? (detection.semantic_tags ?? []).join(", ")
+                            : "-"}
+                        </td>
                         <td className="py-2 pr-4 font-mono text-xs">
                           {formatTimecode(detection.start_time)} - {formatTimecode(detection.end_time)}
                         </td>
@@ -259,4 +270,3 @@ export default function OcrTestingPage() {
     </div>
   );
 }
-
