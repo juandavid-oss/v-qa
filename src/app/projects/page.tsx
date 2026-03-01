@@ -8,7 +8,7 @@ import NewProjectDialog from "@/components/projects/NewProjectDialog";
 import { useProjects } from "@/hooks/useProjects";
 
 export default function ProjectsPage() {
-  const { projects, loading, createProject } = useProjects();
+  const { projects, loading, createProject, deleteProject } = useProjects();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [search, setSearch] = useState("");
 
@@ -91,7 +91,7 @@ export default function ProjectsPage() {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
               {filteredProjects.map((project) => (
-                <ProjectCard key={project.id} project={project} />
+                <ProjectCard key={project.id} project={project} onDelete={deleteProject} />
               ))}
             </div>
           )}

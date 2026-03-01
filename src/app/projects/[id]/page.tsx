@@ -65,8 +65,18 @@ export default function ProjectDetailPage() {
     if (detections) {
       const all = (detections as TextDetection[]).filter((d) => d.is_partial_sequence !== true);
       setTotalDetections(all.length);
-      setSubtitles(all.filter((d) => d.is_subtitle));
-      setFixedTexts(all.filter((d) => d.is_fixed_text));
+
+      // Collect fixed text strings to exclude from subtitles panel
+      const fixed = all.filter((d) => d.is_fixed_text);
+      const fixedTextSet = new Set(fixed.map((d) => d.text.trim().toLowerCase()));
+
+      // Filter subtitles: exclude any text that also appears as fixed/brand text
+      const subs = all.filter(
+        (d) => d.is_subtitle && !fixedTextSet.has(d.text.trim().toLowerCase())
+      );
+
+      setSubtitles(subs);
+      setFixedTexts(fixed);
     }
 
     // Fetch transcriptions

@@ -811,16 +811,40 @@ def filter_false_positives(errors: list[dict], detections: list[dict]) -> list[d
         d["text"].lower() for d in detections if d.get("is_fixed_text")
     }
 
+    # Rule IDs that flag capitalization of the first letter in a sentence
+    capitalization_rules = {
+        "UPPERCASE_SENTENCE_START",
+        "SENTENCE_WHITESPACE",
+        "LC_AFTER_PERIOD",
+        "CAPITALIZATION",
+        "CAPS_FIRST_WORD",
+    }
+
     filtered = []
     for error in errors:
         original_lower = error["original_text"].lower()
+        rule_id = error.get("rule_id", "")
 
         # Skip if it's a brand name
         if original_lower in brand_names:
             continue
 
         # Skip common false positives for proper nouns
-        if error.get("rule_id") == "MORFOLOGIK_RULE_EN_US" and error["original_text"][0].isupper():
+        if rule_id == "MORFOLOGIK_RULE_EN_US" and error["original_text"][0:1].isupper():
+            continue
+
+        # Skip first-letter capitalization rules
+        if rule_id in capitalization_rules:
+            continue
+
+        # Skip if only difference is capitalization of first character
+        suggested = error.get("suggested_text", "")
+        original = error["original_text"]
+        if (
+            original
+            and suggested
+            and original.lower() == suggested.lower()
+        ):
             continue
 
         filtered.append(error)

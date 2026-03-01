@@ -92,5 +92,18 @@ export function useProjects() {
     return createdProject;
   };
 
-  return { projects, loading, createProject, refetch: fetchProjects };
+  const deleteProject = async (projectId: string) => {
+    const { error } = await supabase
+      .from("projects")
+      .delete()
+      .eq("id", projectId);
+
+    if (error) {
+      throw new Error("Could not delete project");
+    }
+
+    setProjects((prev) => prev.filter((p) => p.id !== projectId));
+  };
+
+  return { projects, loading, createProject, deleteProject, refetch: fetchProjects };
 }

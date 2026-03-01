@@ -1,6 +1,7 @@
 "use client";
 
 import type { TextDetection } from "@/types/database";
+import { formatTime } from "@/lib/utils";
 
 interface SubtitlesPanelProps {
   subtitles: TextDetection[];
@@ -24,27 +25,40 @@ export default function SubtitlesPanel({
           {showOnScreenFallback ? "OCR" : "Synced"}
         </span>
       </div>
-      <div className="flex-1 bg-surface-light dark:bg-surface-dark rounded-2xl border border-slate-200 dark:border-slate-800 p-6 overflow-y-auto relative">
-        <div className="space-y-8 py-20">
-          {subtitles.length === 0 ? (
-            <p className="text-center text-slate-500 text-sm">No on-screen text detected yet</p>
-          ) : (
-            subtitles.map((sub) => {
-              const isActive =
-                currentTime >= sub.start_time && currentTime <= sub.end_time;
-              return (
+      <div className="flex-1 bg-surface-light dark:bg-surface-dark rounded-2xl border border-slate-200 dark:border-slate-800 p-5 overflow-y-auto space-y-4">
+        {subtitles.length === 0 ? (
+          <p className="text-center text-slate-500 text-sm py-10">
+            No on-screen text detected yet
+          </p>
+        ) : (
+          subtitles.map((sub) => {
+            const isActive =
+              currentTime >= sub.start_time && currentTime <= sub.end_time;
+            return (
+              <div
+                key={sub.id}
+                className={`p-3 rounded-xl border-l-4 transition-all ${
+                  isActive
+                    ? "bg-slate-50 dark:bg-slate-900/40 border-primary"
+                    : "bg-slate-50/50 dark:bg-slate-900/20 border-slate-200 dark:border-slate-800"
+                }`}
+              >
+                <span className="text-[10px] text-slate-500 mb-1 block uppercase font-bold">
+                  {formatTime(sub.start_time)} &ndash; {formatTime(sub.end_time)}
+                </span>
                 <p
-                  key={sub.id}
-                  className={`spotify-style-text font-bold text-xl transition-all ${
-                    isActive ? "active-subtitle text-2xl" : "inactive-subtitle"
+                  className={`text-sm leading-relaxed ${
+                    isActive
+                      ? "text-slate-600 dark:text-slate-300 font-medium"
+                      : "text-slate-400"
                   }`}
                 >
                   {sub.text}
                 </p>
-              );
-            })
-          )}
-        </div>
+              </div>
+            );
+          })
+        )}
       </div>
     </div>
   );

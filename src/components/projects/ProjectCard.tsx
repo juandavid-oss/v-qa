@@ -1,11 +1,13 @@
 "use client";
 
+import { useState, useRef, useEffect } from "react";
 import type { Project } from "@/types/database";
 import { relativeTime, statusLabel } from "@/lib/utils";
 import Link from "next/link";
 
 interface ProjectCardProps {
   project: Project;
+  onDelete?: (projectId: string) => void;
 }
 
 function StatusBadge({ project }: { project: Project }) {
@@ -46,8 +48,36 @@ function StatusBadge({ project }: { project: Project }) {
   );
 }
 
-export default function ProjectCard({ project }: ProjectCardProps) {
+export default function ProjectCard({ project, onDelete }: ProjectCardProps) {
   const isProcessing = !["pending", "completed", "error"].includes(project.status);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+        setConfirmDelete(false);
+      }
+    };
+    if (menuOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [menuOpen]);
+
+  const handleDelete = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
+    }
+    onDelete?.(project.id);
+    setMenuOpen(false);
+    setConfirmDelete(false);
+  };
 
   return (
     <Link href={`/projects/${project.id}`}>
@@ -92,12 +122,30 @@ export default function ProjectCard({ project }: ProjectCardProps) {
               </h3>
               <p className="text-xs text-slate-500 mt-1">{relativeTime(project.created_at)}</p>
             </div>
-            <button
-              onClick={(e) => e.preventDefault()}
-              className="text-slate-400 hover:text-slate-600 dark:hover:text-white transition-colors cursor-pointer"
-            >
-              <span className="material-symbols-outlined">more_vert</span>
-            </button>
+            <div className="relative" ref={menuRef}>
+              <button
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setMenuOpen(!menuOpen);
+                  setConfirmDelete(false);
+                }}
+                className="text-slate-400 hover:text-slate-600 dark:hover:text-white transition-colors cursor-pointer p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                <span className="material-symbols-outlined">more_vert</span>
+              </button>
+              {menuOpen && (
+                <div className="absolute right-0 top-full mt-1 w-44 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl shadow-xl z-50 overflow-hidden">
+                  <button
+                    onClick={handleDelete}
+                    className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-500/10 transition-colors cursor-pointer"
+                  >
+                    <span className="material-symbols-outlined text-base">delete</span>
+                    {confirmDelete ? "Confirm delete?" : "Delete project"}
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           {isProcessing ? (
