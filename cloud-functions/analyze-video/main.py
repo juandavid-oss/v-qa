@@ -9,7 +9,6 @@ import uuid
 import json
 import subprocess
 import tempfile
-from difflib import SequenceMatcher
 from urllib.parse import urlparse, parse_qs
 
 import functions_framework
@@ -1053,6 +1052,17 @@ def _normalize_spell_token(text: str) -> str:
     return re.sub(r"[^\w\s]", "", text).strip().lower()
 
 
+def _prepare_spellcheck_text(text: str) -> str:
+    """Prepare subtitle text for spellcheck while preserving contractions like I've/don't."""
+    if not text:
+        return ""
+    # Normalize curly apostrophes and remove punctuation except apostrophes.
+    value = text.replace("’", "'")
+    value = re.sub(r"[^\w\s']", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
 def check_spelling(
     texts: list[dict],
     debug_by_detection_id: dict[str, list[dict]] | None = None,
@@ -1063,8 +1073,6 @@ def check_spelling(
     if not SPELLCHECK_API_KEY:
         raise ValueError("SPELLCHECK_API_KEY is not configured")
 
-    import re
-
     for item in texts:
         raw_text = item["text"]
         timestamp = item.get("start_time", 0)
@@ -1072,8 +1080,8 @@ def check_spelling(
         if not raw_text or not raw_text.strip():
             continue
 
-        # Strip punctuation and exclamation/question marks before sending to API
-        text = re.sub(r"[^\w\s]", "", raw_text).strip()
+        # Keep apostrophes so contractions don't become false positives (e.g. I've -> Ive).
+        text = _prepare_spellcheck_text(raw_text)
         if not text:
             continue
 
@@ -1200,66 +1208,54 @@ def _normalize_for_comparison(text: str) -> str:
     return t
 
 
+def _normalize_for_contains(text: str) -> str:
+    """Normalize text for strict contains checks (ignore punctuation/case/spacing)."""
+    return _normalize_for_comparison(text).replace(" ", "")
+
+
 OVERLAP_TOLERANCE = 1.5
 
 
 def detect_mismatches(subtitles: list[dict], transcriptions: list[dict]) -> list[dict]:
-    """Compare filtered subtitles against audio transcription to find mismatches."""
+    """Flag transcription rows not contained in nearby subtitles (±1.5s window)."""
     mismatches = []
 
-    for sub in subtitles:
-        # Find overlapping transcription segments (with 1.5s tolerance)
-        overlapping = [
-            t for t in transcriptions
-            if t["start_time"] < (sub["end_time"] + OVERLAP_TOLERANCE)
-            and t["end_time"] > (sub["start_time"] - OVERLAP_TOLERANCE)
+    for t in transcriptions:
+        # Join nearby subtitle text around the transcription window.
+        nearby_subs = [
+            s for s in subtitles
+            if s["start_time"] <= (t["end_time"] + OVERLAP_TOLERANCE)
+            and s["end_time"] >= (t["start_time"] - OVERLAP_TOLERANCE)
         ]
 
-        if not overlapping:
+        if not nearby_subs:
             mismatches.append({
-                "subtitle_text": sub["text"],
-                "transcription_text": "[no audio detected]",
-                "start_time": sub["start_time"],
-                "end_time": sub["end_time"],
+                "subtitle_text": "[no nearby subtitle]",
+                "transcription_text": t["text"],
+                "start_time": t["start_time"],
+                "end_time": t["end_time"],
                 "severity": "high",
-                "mismatch_type": "missing_audio",
+                "mismatch_type": "missing_subtitle_window",
             })
             continue
 
-        combined_transcript = " ".join(t["text"] for t in overlapping)
+        nearby_subs.sort(key=lambda s: (s.get("start_time", 0.0), s.get("end_time", 0.0)))
+        joined_subtitles = " ".join(s.get("text", "") for s in nearby_subs if s.get("text"))
+        norm_subtitles = _normalize_for_contains(joined_subtitles)
+        norm_transcript = _normalize_for_contains(t.get("text", ""))
 
-        norm_sub = _normalize_for_comparison(sub["text"])
-        norm_trans = _normalize_for_comparison(combined_transcript)
-
-        ratio = SequenceMatcher(None, norm_sub, norm_trans).ratio()
-
-        if ratio < 0.85:
-            severity = "high" if ratio < 0.5 else "medium" if ratio < 0.75 else "low"
+        # Contains-based check requested by product: transcription should appear in nearby subtitles.
+        if not norm_transcript or norm_transcript not in norm_subtitles:
             mismatches.append({
-                "subtitle_text": sub["text"],
-                "transcription_text": combined_transcript,
-                "start_time": sub["start_time"],
-                "end_time": sub["end_time"],
-                "severity": severity,
-                "mismatch_type": _classify_mismatch(sub["text"], combined_transcript),
+                "subtitle_text": joined_subtitles or "[no nearby subtitle text]",
+                "transcription_text": t.get("text", ""),
+                "start_time": t["start_time"],
+                "end_time": t["end_time"],
+                "severity": "medium",
+                "mismatch_type": "transcript_not_contained_in_subtitles",
             })
 
     return mismatches
-
-
-def _classify_mismatch(subtitle: str, transcript: str) -> str:
-    sub_words = set(_normalize_for_comparison(subtitle).split())
-    trans_words = set(_normalize_for_comparison(transcript).split())
-
-    missing = sub_words - trans_words
-    extra = trans_words - sub_words
-
-    if missing and not extra:
-        return "missing_word"
-    elif extra and not missing:
-        return "extra_word"
-    else:
-        return "different_word"
 
 
 # --- 8. Store Results in Supabase ---
