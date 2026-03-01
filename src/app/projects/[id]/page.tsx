@@ -233,6 +233,7 @@ export default function ProjectDetailPage() {
   const isProcessing = !["pending", "completed", "error"].includes(status);
   const panelDetections = subtitles.length > 0 ? subtitles : fixedTexts;
   const showingOnScreenFallback = subtitles.length === 0 && fixedTexts.length > 0;
+  const panelHeightClass = "h-[600px]";
 
   return (
     <div className="flex flex-col min-h-screen relative">
@@ -255,7 +256,7 @@ export default function ProjectDetailPage() {
         {/* 3-column layout */}
         <div className="grid grid-cols-12 gap-6 mb-6">
           {/* Subtitles - Left */}
-          <div className="col-span-12 lg:col-span-3 h-[600px]">
+          <div className={`col-span-12 lg:col-span-3 ${panelHeightClass}`}>
             <SubtitlesPanel
               subtitles={panelDetections}
               currentTime={currentTime}
@@ -264,7 +265,7 @@ export default function ProjectDetailPage() {
           </div>
 
           {/* Video Preview - Center */}
-          <div className="col-span-12 lg:col-span-6 flex flex-col gap-2">
+          <div className={`col-span-12 lg:col-span-6 ${panelHeightClass}`}>
             <VideoPreview
               videoUrl={project.video_url}
               thumbnailUrl={project.thumbnail_url}
@@ -280,7 +281,7 @@ export default function ProjectDetailPage() {
           </div>
 
           {/* Transcription - Right */}
-          <div className="col-span-12 lg:col-span-3 h-[600px]">
+          <div className={`col-span-12 lg:col-span-3 ${panelHeightClass}`}>
             <TranscriptionPanel
               transcriptions={transcriptions}
               mismatches={mismatches}

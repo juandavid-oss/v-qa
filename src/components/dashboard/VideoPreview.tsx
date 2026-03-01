@@ -49,17 +49,18 @@ export default function VideoPreview({
   // Initialize video.js player
   useEffect(() => {
     if (!videoContainerRef.current || !videoUrl) return;
+    videoContainerRef.current.innerHTML = "";
 
     // Create video element
     const videoEl = document.createElement("video");
-    videoEl.classList.add("video-js", "vjs-big-play-centered", "vjs-theme-custom");
+    videoEl.classList.add("video-js", "vjs-big-play-centered", "vjs-theme-custom", "w-full", "h-full");
     videoContainerRef.current.appendChild(videoEl);
     videoElementRef.current = videoEl;
 
     const player = videojs(videoEl, {
       controls: true,
-      fluid: true,
-      responsive: true,
+      fluid: false,
+      responsive: false,
       preload: "auto",
       poster: thumbnailUrl || undefined,
       sources: [{ src: videoUrl, type: "video/mp4" }],
@@ -185,7 +186,7 @@ export default function VideoPreview({
   }, [updateMarkers]);
 
   return (
-    <div className="flex flex-col">
+    <div className="h-full flex flex-col">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
           <h2 className="font-display font-bold text-lg text-slate-900 dark:text-slate-100">
@@ -211,22 +212,24 @@ export default function VideoPreview({
         </div>
       </div>
 
-      <div className="mx-auto w-full max-w-[760px] vjs-container">
+      <div className="vjs-container flex-1 min-h-0">
         {videoUrl ? (
-          <div ref={videoContainerRef} />
+          <div className="h-full w-full bg-black rounded-2xl border border-slate-800 overflow-hidden">
+            <div ref={videoContainerRef} className="h-full w-full" />
+          </div>
         ) : thumbnailUrl ? (
-          <div className="bg-black rounded-2xl overflow-hidden border border-slate-800">
-            <div className="relative bg-black h-[220px] sm:h-[280px] md:h-[360px] lg:h-[405px]">
+          <div className="h-full w-full bg-black rounded-2xl overflow-hidden border border-slate-800">
+            <div className="relative bg-black h-full w-full">
               <img
                 alt="Video frame preview"
-                className="w-full h-full object-cover opacity-80 bg-black"
+                className="w-full h-full object-contain opacity-80 bg-black"
                 src={thumbnailUrl}
               />
             </div>
           </div>
         ) : (
-          <div className="bg-black rounded-2xl overflow-hidden border border-slate-800">
-            <div className="h-[220px] sm:h-[280px] md:h-[360px] lg:h-[405px] flex items-center justify-center">
+          <div className="h-full w-full bg-black rounded-2xl overflow-hidden border border-slate-800">
+            <div className="h-full flex items-center justify-center">
               <span className="material-symbols-outlined text-slate-700 text-6xl">movie</span>
             </div>
           </div>

@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useMemo, useRef } from "react";
 import type { Transcription, Mismatch } from "@/types/database";
 import { formatTime } from "@/lib/utils";
 
@@ -14,6 +15,21 @@ export default function TranscriptionPanel({
   mismatches,
   currentTime,
 }: TranscriptionPanelProps) {
+  const transcriptionRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  const activeTranscription = useMemo(
+    () =>
+      transcriptions.find((t) => currentTime >= t.start_time && currentTime <= t.end_time) ?? null,
+    [transcriptions, currentTime]
+  );
+
+  useEffect(() => {
+    if (!activeTranscription) return;
+    const activeElement = transcriptionRefs.current[activeTranscription.id];
+    if (!activeElement) return;
+    activeElement.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [activeTranscription?.id]);
+
   const getMismatchForTranscription = (t: Transcription) =>
     mismatches.find(
       (m) => m.start_time <= t.end_time && m.end_time >= t.start_time
@@ -46,7 +62,14 @@ export default function TranscriptionPanel({
               return (
                 <div
                   key={t.id}
-                  className="p-3 bg-rose-500/5 dark:bg-rose-500/10 rounded-xl border-l-4 border-rose-500"
+                  ref={(element) => {
+                    transcriptionRefs.current[t.id] = element;
+                  }}
+                  className={`p-3 rounded-xl border-l-4 border-rose-500 transition-all ${
+                    isActive
+                      ? "bg-rose-500/10 dark:bg-rose-500/20 ring-2 ring-primary/30"
+                      : "bg-rose-500/5 dark:bg-rose-500/10"
+                  }`}
                 >
                   <div className="flex justify-between items-start mb-1">
                     <span className="text-[10px] text-rose-400 block uppercase font-bold">
@@ -69,7 +92,10 @@ export default function TranscriptionPanel({
             return (
               <div
                 key={t.id}
-                className={`p-3 rounded-xl border-l-4 ${
+                ref={(element) => {
+                  transcriptionRefs.current[t.id] = element;
+                }}
+                className={`p-3 rounded-xl border-l-4 transition-all ${
                   isActive
                     ? "bg-slate-50 dark:bg-slate-900/40 border-primary"
                     : "bg-slate-50/50 dark:bg-slate-900/20 border-slate-200 dark:border-slate-800"

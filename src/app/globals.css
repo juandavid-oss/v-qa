@@ -114,6 +114,12 @@
   border-radius: 16px;
   overflow: hidden;
   border: 1px solid #1e293b;
+  width: 100% !important;
+  height: 100% !important;
+}
+.vjs-container .video-js .vjs-tech {
+  object-fit: contain;
+  background: #000;
 }
 .vjs-container .video-js .vjs-control-bar {
   background: rgba(0, 0, 0, 0.7);
