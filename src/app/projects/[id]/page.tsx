@@ -17,6 +17,8 @@ import SpellingPanel from "@/components/dashboard/SpellingPanel";
 import BrandNamesPanel from "@/components/dashboard/BrandNamesPanel";
 import ProcessingOverlay from "@/components/dashboard/ProcessingOverlay";
 
+const MIN_SUBTITLE_CONFIDENCE = 0.9;
+
 export default function ProjectDetailPage() {
   const params = useParams();
   const projectId = params.id as string;
@@ -73,7 +75,10 @@ export default function ProjectDetailPage() {
 
       // Filter subtitles: exclude any text that also appears as fixed/brand text
       const subs = all.filter(
-        (d) => d.is_subtitle && !fixedTextSet.has(d.text.trim().toLowerCase())
+        (d) =>
+          d.is_subtitle &&
+          (typeof d.confidence === "number" ? d.confidence : 0) >= MIN_SUBTITLE_CONFIDENCE &&
+          !fixedTextSet.has(d.text.trim().toLowerCase())
       );
 
       setSubtitles(subs);

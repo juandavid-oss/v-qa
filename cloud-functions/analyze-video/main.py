@@ -58,6 +58,7 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL") or "gemini-flash-latest"
 GEMINI_FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-1.5-flash")
 LANGUAGETOOL_URL = os.environ.get("LANGUAGETOOL_URL", "https://api.languagetool.org/v2/check")
 CLOUD_FUNCTION_SECRET = os.environ.get("CLOUD_FUNCTION_SECRET")
+MIN_SUBTITLE_CONFIDENCE = float(os.environ.get("MIN_SUBTITLE_CONFIDENCE", "0.9"))
 FRAME_IO_TOKEN = os.environ.get("FRAME_IO_TOKEN") or os.environ.get("FRAME_IO_V4_TOKEN")
 FRAME_IO_V4_API = "https://api.frame.io/v4"
 FRAME_MEDIA_LINK_INCLUDES = ",".join((
@@ -1171,6 +1172,7 @@ def build_filtered_subtitles(detections: list[dict]) -> list[dict]:
         d for d in detections
         if d.get("is_subtitle")
         and not d.get("is_partial_sequence")
+        and _to_float(d.get("confidence"), 0.0) >= MIN_SUBTITLE_CONFIDENCE
         and d["text"].strip().lower() not in fixed_text_set
     ]
 
@@ -1282,6 +1284,8 @@ def build_testing_audit_rows(
             subtitle_filter_reason = "excluded_partial_sequence"
         elif not det.get("is_subtitle"):
             subtitle_filter_reason = "excluded_not_subtitle"
+        elif _to_float(det.get("confidence"), 0.0) < MIN_SUBTITLE_CONFIDENCE:
+            subtitle_filter_reason = "excluded_low_confidence"
         elif not is_in_filtered:
             subtitle_filter_reason = "excluded_matches_fixed_text"
         else:

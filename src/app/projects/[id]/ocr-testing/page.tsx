@@ -99,9 +99,14 @@ const EMPTY_COUNTS: OcrTestResponse["counts"] = {
   spelling_filtered_out: 0,
   spelling_no_error: 0,
 };
+const MIN_SUBTITLE_CONFIDENCE = 0.9;
 
 function getDetectionKey(d: OcrDetection) {
   return `${d.text}|${d.start_time}|${d.end_time}`;
+}
+
+function hasEnoughSubtitleConfidence(d: Pick<OcrDetection, "confidence">) {
+  return (typeof d.confidence === "number" ? d.confidence : 0) >= MIN_SUBTITLE_CONFIDENCE;
 }
 
 function fallbackStructuralClassification(d: OcrDetection): OcrAuditRow["structural_classification"] {
@@ -117,12 +122,16 @@ function buildFallbackAuditRows(payload: LegacyOcrTestResponse): OcrAuditRow[] {
   const filteredSet = new Set(filtered.map(getDetectionKey));
 
   return classified.map((d, index) => {
-    const included = filteredSet.has(getDetectionKey(d));
+    const confidentEnough = hasEnoughSubtitleConfidence(d);
+    const includedByRules = Boolean(d.is_subtitle) && !Boolean(d.is_partial_sequence) && confidentEnough;
+    const included = filteredSet.size > 0 ? filteredSet.has(getDetectionKey(d)) : includedByRules;
     const checkedInSpelling = Boolean(d.is_subtitle) && !Boolean(d.is_partial_sequence);
     const subtitleFilterReason = d.is_partial_sequence
       ? "excluded_partial_sequence"
       : !d.is_subtitle
         ? "excluded_not_subtitle"
+        : !confidentEnough
+          ? "excluded_low_confidence"
         : included
           ? "included_in_final_subtitles"
           : "excluded_matches_fixed_text";
@@ -219,6 +228,8 @@ function subtitleFilterReasonLabel(reason: string) {
       return "Excluded (partial sequence)";
     case "excluded_not_subtitle":
       return "Excluded (not subtitle)";
+    case "excluded_low_confidence":
+      return `Excluded (not enough confidence < ${MIN_SUBTITLE_CONFIDENCE.toFixed(2)})`;
     case "excluded_matches_fixed_text":
       return "Excluded (matches fixed text)";
     default:
