@@ -796,6 +796,9 @@ def _normalize_repetition_text(text: str) -> str:
     return re.sub(r"\s+", " ", value)
 
 
+_COMPARISON_LABELS = {"before", "after"}
+
+
 def classify_subtitle_vs_fixed(
     detections: list[dict],
     video_duration: float,
@@ -821,6 +824,8 @@ def classify_subtitle_vs_fixed(
         elif video_duration > 0 and duration > video_duration * 0.3:
             score_fixed += 4
 
+        norm_text = _normalize_repetition_text(det.get("text", ""))
+
         # Text length heuristic
         word_count = len(det["text"].split())
         if word_count >= 3:
@@ -828,8 +833,17 @@ def classify_subtitle_vs_fixed(
         elif word_count <= 2 and det["text"][0:1].isupper():
             score_fixed += 1
 
+        # Explicit comparison-label heuristic:
+        # "BEFORE"/"AFTER" overlays are frequent fixed graphics, not spoken subtitles.
+        normalized_token = re.sub(r"[^a-z0-9]+", "", norm_text)
+        if (
+            word_count == 1
+            and normalized_token in _COMPARISON_LABELS
+            and vertical_center < 0.65
+        ):
+            score_fixed += 6
+
         # Repetition heuristic
-        norm_text = _normalize_repetition_text(det.get("text", ""))
         same_text_same_pos = sum(
             1 for d in detections
             if _normalize_repetition_text(d.get("text", "")) == norm_text
