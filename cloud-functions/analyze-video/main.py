@@ -8,6 +8,7 @@ import uuid
 import json
 import subprocess
 import tempfile
+from functools import cmp_to_key
 from urllib.parse import urlparse, parse_qs
 
 import functions_framework
@@ -1186,6 +1187,55 @@ def _normalize_for_contains(text: str) -> str:
 OVERLAP_TOLERANCE = 1.5
 
 
+def _bbox_coord_for_sort(subtitle: dict, coord: str) -> float:
+    bbox = subtitle.get("bbox") or {}
+    value = bbox.get(coord)
+    return float(value) if isinstance(value, (int, float)) else float("inf")
+
+
+def _compare_subtitles_for_join(a: dict, b: dict) -> int:
+    a_start = float(a.get("start_time", 0.0) or 0.0)
+    b_start = float(b.get("start_time", 0.0) or 0.0)
+    a_end = float(a.get("end_time", 0.0) or 0.0)
+    b_end = float(b.get("end_time", 0.0) or 0.0)
+
+    starts_close = abs(a_start - b_start) <= 0.35
+    ends_close = abs(a_end - b_end) <= 0.35
+    if starts_close and ends_close:
+        a_top = _bbox_coord_for_sort(a, "top")
+        b_top = _bbox_coord_for_sort(b, "top")
+        if a_top != b_top:
+            return -1 if a_top < b_top else 1
+
+        a_left = _bbox_coord_for_sort(a, "left")
+        b_left = _bbox_coord_for_sort(b, "left")
+        if a_left != b_left:
+            return -1 if a_left < b_left else 1
+
+    if a_start != b_start:
+        return -1 if a_start < b_start else 1
+    if a_end != b_end:
+        return -1 if a_end < b_end else 1
+
+    a_top = _bbox_coord_for_sort(a, "top")
+    b_top = _bbox_coord_for_sort(b, "top")
+    if a_top != b_top:
+        return -1 if a_top < b_top else 1
+
+    a_left = _bbox_coord_for_sort(a, "left")
+    b_left = _bbox_coord_for_sort(b, "left")
+    if a_left != b_left:
+        return -1 if a_left < b_left else 1
+
+    a_text = (a.get("text") or "").lower()
+    b_text = (b.get("text") or "").lower()
+    if a_text < b_text:
+        return -1
+    if a_text > b_text:
+        return 1
+    return 0
+
+
 def detect_mismatches(subtitles: list[dict], transcriptions: list[dict]) -> list[dict]:
     """Flag transcription rows not contained in nearby subtitles (±1.5s window)."""
     mismatches = []
@@ -1209,7 +1259,7 @@ def detect_mismatches(subtitles: list[dict], transcriptions: list[dict]) -> list
             })
             continue
 
-        nearby_subs.sort(key=lambda s: (s.get("start_time", 0.0), s.get("end_time", 0.0)))
+        nearby_subs.sort(key=cmp_to_key(_compare_subtitles_for_join))
         joined_subtitles = " ".join(s.get("text", "") for s in nearby_subs if s.get("text"))
         norm_subtitles = _normalize_for_contains(joined_subtitles)
         norm_transcript = _normalize_for_contains(t.get("text", ""))
