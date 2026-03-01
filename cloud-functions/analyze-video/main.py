@@ -3,6 +3,7 @@ import re
 import stat
 import tarfile
 import time
+import math
 import traceback
 import uuid
 import json
@@ -60,6 +61,8 @@ SPELLCHECK_API_URL = os.environ.get("SPELLCHECK_API_URL", "https://api.api-ninja
 SPELLCHECK_API_KEY = os.environ.get("SPELLCHECK_API_KEY")
 CLOUD_FUNCTION_SECRET = os.environ.get("CLOUD_FUNCTION_SECRET")
 MIN_SUBTITLE_CONFIDENCE = float(os.environ.get("MIN_SUBTITLE_CONFIDENCE", "0.9"))
+TRANSCRIPTION_MAX_CHUNK_SECONDS = float(os.environ.get("TRANSCRIPTION_MAX_CHUNK_SECONDS", "2.0"))
+TRANSCRIPTION_MIN_CHUNK_SECONDS = float(os.environ.get("TRANSCRIPTION_MIN_CHUNK_SECONDS", "1.0"))
 FRAME_IO_TOKEN = os.environ.get("FRAME_IO_TOKEN") or os.environ.get("FRAME_IO_V4_TOKEN")
 FRAME_IO_V4_API = "https://api.frame.io/v4"
 FRAME_MEDIA_LINK_INCLUDES = ",".join((
@@ -588,6 +591,56 @@ def _to_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _parse_transcription_time_seconds(value, fallback: float | None = None) -> float | None:
+    """Parse transcription timestamps from multiple formats into seconds.
+
+    Accepted formats:
+    - number: 12.34
+    - numeric string: "12.34"
+    - suffixed seconds: "12.34s"
+    - timecode: "MM:SS", "HH:MM:SS", optional decimals in last part
+    - protobuf-like dict: {"seconds": 12, "nanos": 340000000}
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    if isinstance(value, dict):
+        return _parse_duration_seconds(value)
+
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return fallback
+
+        # "12.3s"
+        if raw.endswith("s"):
+            raw_seconds = raw[:-1].strip()
+            try:
+                return float(raw_seconds)
+            except ValueError:
+                pass
+
+        # "12.3"
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+
+        # "MM:SS(.sss)" or "HH:MM:SS(.sss)"
+        if ":" in raw:
+            parts = raw.split(":")
+            if 2 <= len(parts) <= 3:
+                try:
+                    total = 0.0
+                    for part in parts:
+                        total = total * 60.0 + float(part.strip())
+                    return total
+                except ValueError:
+                    pass
+
+    return fallback
+
+
 def extract_detections_from_raw_payload(raw_payload: dict) -> list[dict]:
     detections: list[dict] = []
     annotations = raw_payload.get("annotation_results", [])
@@ -864,6 +917,121 @@ Return ONLY valid JSON, no markdown or other text."""
     )
 
 
+def split_transcription_segments(segments: list[dict]) -> list[dict]:
+    """Split long transcription segments into smaller 1-2s chunks when possible."""
+    if not segments:
+        return []
+
+    max_chunk_seconds = max(0.5, TRANSCRIPTION_MAX_CHUNK_SECONDS)
+    min_chunk_seconds = max(0.1, min(TRANSCRIPTION_MIN_CHUNK_SECONDS, max_chunk_seconds))
+    normalized_segments: list[dict] = []
+    invalid_time_rows = 0
+
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+
+        text = (read_string(segment.get("text")) or "").strip()
+        if not text:
+            continue
+
+        start_time = _parse_transcription_time_seconds(segment.get("start_time"), None)
+        end_time = _parse_transcription_time_seconds(segment.get("end_time"), None)
+
+        if start_time is None and end_time is None:
+            invalid_time_rows += 1
+            continue
+        if start_time is None:
+            start_time = end_time if end_time is not None else 0.0
+        if end_time is None:
+            end_time = start_time
+
+        start_time = max(0.0, float(start_time))
+        end_time = max(0.0, float(end_time))
+        if end_time < start_time:
+            start_time, end_time = end_time, start_time
+
+        normalized_segments.append({
+            "text": text,
+            "start_time": start_time,
+            "end_time": end_time,
+            "speaker": read_string(segment.get("speaker")),
+            "confidence": segment.get("confidence"),
+        })
+
+    if invalid_time_rows > 0:
+        print(
+            f"WARNING: skipped {invalid_time_rows} transcription segments due to invalid timestamps",
+            flush=True,
+        )
+
+    normalized_segments.sort(key=lambda s: (s.get("start_time", 0.0), s.get("end_time", 0.0)))
+    split_segments: list[dict] = []
+
+    for segment in normalized_segments:
+        text = segment["text"]
+        start_time = segment["start_time"]
+        end_time = segment["end_time"]
+        speaker = segment.get("speaker")
+        confidence = segment.get("confidence")
+
+        if end_time < start_time:
+            start_time, end_time = end_time, start_time
+
+        duration = max(0.0, end_time - start_time)
+        words = text.split()
+
+        if duration <= max_chunk_seconds or len(words) <= 1:
+            split_segments.append({
+                "text": text,
+                "start_time": start_time,
+                "end_time": end_time,
+                "speaker": speaker,
+                "confidence": confidence,
+            })
+            continue
+
+        chunk_count = max(1, math.ceil(duration / max_chunk_seconds))
+        if chunk_count > 1 and duration / chunk_count < min_chunk_seconds:
+            chunk_count = max(1, math.floor(duration / min_chunk_seconds))
+        chunk_count = max(1, min(chunk_count, len(words)))
+
+        if chunk_count <= 1:
+            split_segments.append({
+                "text": text,
+                "start_time": start_time,
+                "end_time": end_time,
+                "speaker": speaker,
+                "confidence": confidence,
+            })
+            continue
+
+        chunk_duration = duration / chunk_count
+        base_word_count = len(words) // chunk_count
+        extra_words = len(words) % chunk_count
+        cursor = 0
+
+        for i in range(chunk_count):
+            words_in_chunk = base_word_count + (1 if i < extra_words else 0)
+            if words_in_chunk <= 0:
+                continue
+
+            chunk_words = words[cursor: cursor + words_in_chunk]
+            cursor += words_in_chunk
+            chunk_start = start_time + (i * chunk_duration)
+            chunk_end = end_time if i == chunk_count - 1 else start_time + ((i + 1) * chunk_duration)
+
+            split_segments.append({
+                "text": " ".join(chunk_words),
+                "start_time": round(chunk_start, 3),
+                "end_time": round(chunk_end, 3),
+                "speaker": speaker,
+                "confidence": confidence,
+            })
+
+    return split_segments
+
+
 def is_gemini_model_unavailable_error(message: str) -> bool:
     lowered = message.lower()
     if "no longer available to new users" in lowered:
@@ -955,42 +1123,23 @@ def check_spelling(
 
 
 def filter_false_positives(errors: list[dict], detections: list[dict]) -> list[dict]:
-    """Filter out spelling errors that are brand names or partial sequences."""
+    """Filter out spelling errors that are brand names or case-only diffs."""
     brand_names = {
         d["text"].lower() for d in detections if d.get("is_fixed_text")
     }
 
-    # Rule IDs that flag capitalization of the first letter in a sentence
-    capitalization_rules = {
-        "UPPERCASE_SENTENCE_START",
-        "SENTENCE_WHITESPACE",
-        "LC_AFTER_PERIOD",
-        "CAPITALIZATION",
-        "CAPS_FIRST_WORD",
-    }
-
     filtered = []
     for error in errors:
-        original_lower = error["original_text"].lower()
-        rule_id = error.get("rule_id", "")
+        original = error["original_text"]
+        original_lower = original.lower()
         has_replacement = bool(error.get("has_replacement", True))
 
         # Skip if it's a brand name
         if original_lower in brand_names:
             continue
 
-        # Skip common false positives for proper nouns
-        if rule_id == "MORFOLOGIK_RULE_EN_US" and error["original_text"][0:1].isupper():
-            continue
-
-        # Skip first-letter capitalization rules
-        if rule_id in capitalization_rules:
-            continue
-
-        # Skip if only difference is capitalization of first character.
-        # Keep matches with no replacement, because those were explicitly requested.
+        # Skip if only difference is capitalization
         suggested = error.get("suggested_text", "")
-        original = error["original_text"]
         if (
             has_replacement
             and original
@@ -1541,11 +1690,16 @@ def analyze_video(request):
 
             update_status(supabase, project_id, "transcribing_audio", 55,
                           "Sending audio to Gemini for transcription...")
-            transcription_segments = transcribe_with_gemini(audio_path)
+            raw_transcription_segments = transcribe_with_gemini(audio_path)
+            transcription_segments = split_transcription_segments(raw_transcription_segments)
             elapsed = time.time() - t3
             store_transcriptions(supabase, project_id, transcription_segments)
             update_status(supabase, project_id, "transcribing_audio", 65,
-                          f"Transcription done: {len(transcription_segments)} segments in {elapsed:.1f}s")
+                          (
+                              "Transcription done: "
+                              f"{len(raw_transcription_segments)} raw segments -> "
+                              f"{len(transcription_segments)} chunks in {elapsed:.1f}s"
+                          ))
 
             # ── Step 4: Check spelling (API Ninjas) ─────────────────
             t4 = time.time()
