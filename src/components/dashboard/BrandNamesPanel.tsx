@@ -3,43 +3,25 @@
 import type { TextDetection } from "@/types/database";
 
 interface BrandNamesPanelProps {
-  detections: TextDetection[];
+  fixedTexts: TextDetection[];
 }
 
 interface BrandCount {
-  key: string;
   text: string;
   count: number;
-  hasBrand: boolean;
-  hasProper: boolean;
 }
 
-export default function BrandNamesPanel({ detections }: BrandNamesPanelProps) {
-  // Group names/brands by canonical text (fallback to raw text) and count occurrences.
+export default function BrandNamesPanel({ fixedTexts }: BrandNamesPanelProps) {
+  // Group fixed texts by their text content and count occurrences
   const brandCounts: BrandCount[] = [];
   const seen = new Map<string, number>();
-  for (const detection of detections) {
-    const rawKey = (detection.canonical_text ?? detection.text).trim();
-    if (!rawKey) continue;
-    const key = rawKey.toLowerCase();
-    const semanticTags = detection.semantic_tags ?? [];
-    const hasBrand = semanticTags.includes("brand_name");
-    const hasProper = semanticTags.includes("proper_name");
-
+  for (const t of fixedTexts) {
+    const key = t.text.trim();
     if (seen.has(key)) {
-      const index = seen.get(key)!;
-      brandCounts[index].count++;
-      brandCounts[index].hasBrand = brandCounts[index].hasBrand || hasBrand;
-      brandCounts[index].hasProper = brandCounts[index].hasProper || hasProper;
+      brandCounts[seen.get(key)!].count++;
     } else {
       seen.set(key, brandCounts.length);
-      brandCounts.push({
-        key,
-        text: rawKey,
-        count: 1,
-        hasBrand,
-        hasProper,
-      });
+      brandCounts.push({ text: key, count: 1 });
     }
   }
   brandCounts.sort((a, b) => b.count - a.count);
@@ -56,11 +38,11 @@ export default function BrandNamesPanel({ detections }: BrandNamesPanelProps) {
 
       <div className="flex flex-wrap gap-3">
         {brandCounts.length === 0 ? (
-          <p className="text-sm text-slate-500">No brands or proper names detected</p>
+          <p className="text-sm text-slate-500">No brand names detected</p>
         ) : (
           brandCounts.map((brand, i) => (
             <div
-              key={brand.key}
+              key={brand.text}
               className={`flex items-center gap-2 px-4 py-2 border rounded-full ${
                 i === 0
                   ? "bg-primary/10 border-primary/20"
@@ -78,13 +60,6 @@ export default function BrandNamesPanel({ detections }: BrandNamesPanelProps) {
                 }`}
               >
                 {brand.text}
-              </span>
-              <span className="text-[10px] text-slate-400">
-                {brand.hasBrand && brand.hasProper
-                  ? "Brand + Name"
-                  : brand.hasBrand
-                    ? "Brand"
-                    : "Name"}
               </span>
               <span className="text-[10px] text-slate-400 ml-1">{brand.count}x</span>
             </div>
