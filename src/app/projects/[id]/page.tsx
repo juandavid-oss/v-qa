@@ -24,7 +24,7 @@ export default function ProjectDetailPage() {
   const [project, setProject] = useState<Project | null>(null);
   const [subtitles, setSubtitles] = useState<TextDetection[]>([]);
   const [fixedTexts, setFixedTexts] = useState<TextDetection[]>([]);
-  const [totalDetections, setTotalDetections] = useState(0);
+
   const [transcriptions, setTranscriptions] = useState<Transcription[]>([]);
   const [spellingErrors, setSpellingErrors] = useState<SpellingError[]>([]);
   const [mismatches, setMismatches] = useState<Mismatch[]>([]);
@@ -64,7 +64,7 @@ export default function ProjectDetailPage() {
 
     if (detections) {
       const all = (detections as TextDetection[]).filter((d) => d.is_partial_sequence !== true);
-      setTotalDetections(all.length);
+
 
       // Collect fixed text strings to exclude from subtitles panel
       const fixed = all.filter((d) => d.is_fixed_text);
@@ -172,7 +172,7 @@ export default function ProjectDetailPage() {
       setProject(updatedProject as Project);
       setSubtitles([]);
       setFixedTexts([]);
-      setTotalDetections(0);
+
       setTranscriptions([]);
       setSpellingErrors([]);
       setMismatches([]);
@@ -292,7 +292,7 @@ export default function ProjectDetailPage() {
         {/* Bottom panels */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <SpellingPanel errors={spellingErrors} />
-          <BrandNamesPanel fixedTexts={fixedTexts} totalDetections={totalDetections} />
+          <BrandNamesPanel fixedTexts={fixedTexts} />
         </div>
       </main>
 
