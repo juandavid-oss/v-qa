@@ -97,9 +97,6 @@ export default function Navbar({
       </div>
 
       <div className="flex items-center gap-4 ml-6">
-        <button className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer">
-          <span className="material-symbols-outlined text-slate-500">notifications</span>
-        </button>
         <div className="relative group">
           <div className="h-10 w-10 rounded-full bg-gradient-to-tr from-primary to-accent-purple p-[2px] cursor-pointer">
             <div className="h-full w-full rounded-full bg-white dark:bg-slate-900 flex items-center justify-center text-sm font-bold text-primary">

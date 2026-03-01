@@ -108,3 +108,15 @@
 .glow-effect {
   box-shadow: 0 0 50px -12px rgba(139, 92, 246, 0.25);
 }
+
+/* Plyr theme overrides */
+.plyr-container {
+  --plyr-color-main: #8B5CF6;
+  --plyr-video-background: #000;
+  --plyr-control-radius: 8px;
+}
+.plyr-container .plyr {
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid #1e293b;
+}

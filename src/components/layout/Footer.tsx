@@ -10,8 +10,6 @@ export default function Footer() {
         <span>Last sync: 2 minutes ago</span>
       </div>
       <div className="flex items-center gap-6">
-        <span className="hover:text-primary cursor-pointer transition-colors">Documentation</span>
-        <span className="hover:text-primary cursor-pointer transition-colors">API Status</span>
         <span className="flex items-center gap-1">
           Made by <span className="text-primary ml-1">Viral Ideas</span>
         </span>
