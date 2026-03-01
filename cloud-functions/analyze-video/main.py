@@ -3,7 +3,6 @@ import re
 import stat
 import tarfile
 import time
-import math
 import traceback
 import uuid
 import json
@@ -950,12 +949,14 @@ Return ONLY valid JSON, no markdown or other text."""
 
 
 def split_transcription_segments(segments: list[dict]) -> list[dict]:
-    """Split long transcription segments into smaller 1-2s chunks when possible."""
+    """Normalize transcription segments preserving original Gemini timestamps.
+
+    Important: this function does NOT synthesize/chunk timestamps. It only parses
+    and sanitizes the start/end times returned by Gemini, so UI cards align with
+    real transcription timing.
+    """
     if not segments:
         return []
-
-    max_chunk_seconds = max(0.5, TRANSCRIPTION_MAX_CHUNK_SECONDS)
-    min_chunk_seconds = max(0.1, min(TRANSCRIPTION_MIN_CHUNK_SECONDS, max_chunk_seconds))
     normalized_segments: list[dict] = []
     invalid_time_rows = 0
 
@@ -996,72 +997,8 @@ def split_transcription_segments(segments: list[dict]) -> list[dict]:
             f"WARNING: skipped {invalid_time_rows} transcription segments due to invalid timestamps",
             flush=True,
         )
-
     normalized_segments.sort(key=lambda s: (s.get("start_time", 0.0), s.get("end_time", 0.0)))
-    split_segments: list[dict] = []
-
-    for segment in normalized_segments:
-        text = segment["text"]
-        start_time = segment["start_time"]
-        end_time = segment["end_time"]
-        speaker = segment.get("speaker")
-        confidence = segment.get("confidence")
-
-        if end_time < start_time:
-            start_time, end_time = end_time, start_time
-
-        duration = max(0.0, end_time - start_time)
-        words = text.split()
-
-        if duration <= max_chunk_seconds or len(words) <= 1:
-            split_segments.append({
-                "text": text,
-                "start_time": start_time,
-                "end_time": end_time,
-                "speaker": speaker,
-                "confidence": confidence,
-            })
-            continue
-
-        chunk_count = max(1, math.ceil(duration / max_chunk_seconds))
-        if chunk_count > 1 and duration / chunk_count < min_chunk_seconds:
-            chunk_count = max(1, math.floor(duration / min_chunk_seconds))
-        chunk_count = max(1, min(chunk_count, len(words)))
-
-        if chunk_count <= 1:
-            split_segments.append({
-                "text": text,
-                "start_time": start_time,
-                "end_time": end_time,
-                "speaker": speaker,
-                "confidence": confidence,
-            })
-            continue
-
-        chunk_duration = duration / chunk_count
-        base_word_count = len(words) // chunk_count
-        extra_words = len(words) % chunk_count
-        cursor = 0
-
-        for i in range(chunk_count):
-            words_in_chunk = base_word_count + (1 if i < extra_words else 0)
-            if words_in_chunk <= 0:
-                continue
-
-            chunk_words = words[cursor: cursor + words_in_chunk]
-            cursor += words_in_chunk
-            chunk_start = start_time + (i * chunk_duration)
-            chunk_end = end_time if i == chunk_count - 1 else start_time + ((i + 1) * chunk_duration)
-
-            split_segments.append({
-                "text": " ".join(chunk_words),
-                "start_time": round(chunk_start, 3),
-                "end_time": round(chunk_end, 3),
-                "speaker": speaker,
-                "confidence": confidence,
-            })
-
-    return split_segments
+    return normalized_segments
 
 
 def is_gemini_model_unavailable_error(message: str) -> bool:
@@ -1780,7 +1717,7 @@ def analyze_video(request):
                           (
                               "Transcription done: "
                               f"{len(raw_transcription_segments)} raw segments -> "
-                              f"{len(transcription_segments)} chunks in {elapsed:.1f}s"
+                              f"{len(transcription_segments)} normalized segments in {elapsed:.1f}s"
                           ))
 
             # ── Step 4: Check spelling (API Ninjas) ─────────────────
