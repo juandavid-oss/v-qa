@@ -782,11 +782,8 @@ def check_spelling(texts: list[dict]) -> list[dict]:
         result = response.json()
         for match in result.get("matches", []):
             replacements = match.get("replacements", [])
-            if not replacements:
-                continue
-
             original = text[match["offset"]:match["offset"] + match["length"]]
-            suggested = replacements[0]["value"]
+            suggested = replacements[0]["value"] if replacements else original
 
             # Build context
             start = max(0, match["offset"] - 20)
@@ -800,6 +797,7 @@ def check_spelling(texts: list[dict]) -> list[dict]:
                 "timestamp": timestamp,
                 "rule_id": match.get("rule", {}).get("id", ""),
                 "source": "subtitle",
+                "has_replacement": bool(replacements),
             })
 
     return errors
@@ -811,16 +809,43 @@ def filter_false_positives(errors: list[dict], detections: list[dict]) -> list[d
         d["text"].lower() for d in detections if d.get("is_fixed_text")
     }
 
+    # Rule IDs that flag capitalization of the first letter in a sentence
+    capitalization_rules = {
+        "UPPERCASE_SENTENCE_START",
+        "SENTENCE_WHITESPACE",
+        "LC_AFTER_PERIOD",
+        "CAPITALIZATION",
+        "CAPS_FIRST_WORD",
+    }
+
     filtered = []
     for error in errors:
         original_lower = error["original_text"].lower()
+        rule_id = error.get("rule_id", "")
+        has_replacement = bool(error.get("has_replacement", True))
 
         # Skip if it's a brand name
         if original_lower in brand_names:
             continue
 
         # Skip common false positives for proper nouns
-        if error.get("rule_id") == "MORFOLOGIK_RULE_EN_US" and error["original_text"][0:1].isupper():
+        if rule_id == "MORFOLOGIK_RULE_EN_US" and error["original_text"][0:1].isupper():
+            continue
+
+        # Skip first-letter capitalization rules
+        if rule_id in capitalization_rules:
+            continue
+
+        # Skip if only difference is capitalization of first character.
+        # Keep matches with no replacement, because those were explicitly requested.
+        suggested = error.get("suggested_text", "")
+        original = error["original_text"]
+        if (
+            has_replacement
+            and original
+            and suggested
+            and original.lower() == suggested.lower()
+        ):
             continue
 
         filtered.append(error)
