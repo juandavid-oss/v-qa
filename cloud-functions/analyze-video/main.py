@@ -718,6 +718,38 @@ def bbox_overlap(a: dict, b: dict) -> float:
     return intersection / union if union > 0 else 0
 
 
+def bbox_is_similar_zone(a: dict, b: dict) -> bool:
+    """Return True when two boxes are in effectively the same on-screen zone.
+
+    This is intentionally tolerant to small animation drift (position/scale changes)
+    while still requiring meaningful spatial consistency.
+    """
+    iou = bbox_overlap(a, b)
+    if iou >= 0.45:
+        return True
+
+    a_w = max(a["right"] - a["left"], 1e-6)
+    a_h = max(a["bottom"] - a["top"], 1e-6)
+    b_w = max(b["right"] - b["left"], 1e-6)
+    b_h = max(b["bottom"] - b["top"], 1e-6)
+
+    a_cx = (a["left"] + a["right"]) / 2
+    a_cy = (a["top"] + a["bottom"]) / 2
+    b_cx = (b["left"] + b["right"]) / 2
+    b_cy = (b["top"] + b["bottom"]) / 2
+
+    dx = abs(a_cx - b_cx)
+    dy = abs(a_cy - b_cy)
+    allowed_dx = 0.80 * max(a_w, b_w) + 0.01
+    allowed_dy = 0.80 * max(a_h, b_h) + 0.01
+
+    area_a = a_w * a_h
+    area_b = b_w * b_h
+    area_ratio = max(area_a, area_b) / max(min(area_a, area_b), 1e-6)
+
+    return dx <= allowed_dx and dy <= allowed_dy and area_ratio <= 2.5
+
+
 def merge_partial_sequences(detections: list[dict]) -> list[dict]:
     """
     Groups text detections that are partial sequences of each other
@@ -836,7 +868,7 @@ def classify_subtitle_vs_fixed(
             1 for d in detections
             if _normalize_repetition_text(d.get("text", "")) == norm_text
             and d is not det
-            and bbox_overlap(d["bbox"], det["bbox"]) >= 0.70
+            and bbox_is_similar_zone(d["bbox"], det["bbox"])
         )
         if same_text_same_pos >= 3:
             # Strong boost: repeated text in nearly the same spot is usually fixed overlay.
