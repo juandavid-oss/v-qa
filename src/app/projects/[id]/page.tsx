@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
@@ -18,6 +18,21 @@ import BrandNamesPanel from "@/components/dashboard/BrandNamesPanel";
 import ProcessingOverlay from "@/components/dashboard/ProcessingOverlay";
 
 const MIN_SUBTITLE_CONFIDENCE = 0.9;
+
+function normalizeSyncText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function subtitleMatchesTranscription(subtitle: TextDetection, transcription: Transcription): boolean {
+  const subtitleNorm = normalizeSyncText(subtitle.text);
+  const transcriptionNorm = normalizeSyncText(transcription.text);
+  if (!subtitleNorm || !transcriptionNorm) return false;
+  return transcriptionNorm.includes(subtitleNorm);
+}
 
 export default function ProjectDetailPage() {
   const params = useParams();
@@ -283,6 +298,21 @@ export default function ProjectDetailPage() {
   const showingOnScreenFallback = subtitles.length === 0 && fixedTexts.length > 0;
   const panelHeightClass = "h-[600px]";
 
+  const subtitleSyncById = useMemo(() => {
+    const result: Record<string, boolean> = {};
+    for (const subtitle of subtitles) {
+      const isSynced = transcriptions.some((transcription) => {
+        const withinWindow =
+          subtitle.start_time >= transcription.start_time &&
+          subtitle.end_time <= transcription.end_time;
+        if (!withinWindow) return false;
+        return subtitleMatchesTranscription(subtitle, transcription);
+      });
+      result[subtitle.id] = isSynced;
+    }
+    return result;
+  }, [subtitles, transcriptions]);
+
   return (
     <div className="flex flex-col min-h-screen relative">
       <Navbar
@@ -331,6 +361,7 @@ export default function ProjectDetailPage() {
               subtitles={panelDetections}
               currentTime={currentTime}
               showOnScreenFallback={showingOnScreenFallback}
+              syncBySubtitleId={subtitleSyncById}
             />
           </div>
 
@@ -354,7 +385,6 @@ export default function ProjectDetailPage() {
           <div className={`col-span-12 lg:col-span-3 ${panelHeightClass}`}>
             <TranscriptionPanel
               transcriptions={transcriptions}
-              mismatches={mismatches}
               currentTime={currentTime}
             />
           </div>

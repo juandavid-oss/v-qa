@@ -1,18 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useRef } from "react";
-import type { Transcription, Mismatch } from "@/types/database";
+import type { Transcription } from "@/types/database";
 import { formatTime } from "@/lib/utils";
 
 interface TranscriptionPanelProps {
   transcriptions: Transcription[];
-  mismatches: Mismatch[];
   currentTime: number;
 }
 
 export default function TranscriptionPanel({
   transcriptions,
-  mismatches,
   currentTime,
 }: TranscriptionPanelProps) {
   const transcriptionRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -30,11 +28,6 @@ export default function TranscriptionPanel({
     activeElement.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [activeTranscription?.id]);
 
-  const getMismatchForTranscription = (t: Transcription) =>
-    mismatches.find(
-      (m) => m.start_time <= t.end_time && m.end_time >= t.start_time
-    );
-
   return (
     <div className="h-full flex flex-col">
       <div className="flex items-center justify-between mb-4">
@@ -42,9 +35,9 @@ export default function TranscriptionPanel({
           <span className="material-symbols-outlined text-primary">graphic_eq</span>
           Transcription
         </h2>
-        <div className="flex items-center gap-1 text-[10px] font-bold text-emerald-500 bg-emerald-500/10 px-2 py-1 rounded uppercase">
-          <span className="material-symbols-outlined text-[12px] font-bold">check_circle</span>
-          {transcriptions.length > 0 ? "Synced" : "Waiting"}
+        <div className="flex items-center gap-1 text-[10px] font-bold text-slate-500 bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded uppercase">
+          <span className="material-symbols-outlined text-[12px] font-bold">subject</span>
+          {transcriptions.length > 0 ? "Ready" : "Waiting"}
         </div>
       </div>
 
@@ -55,39 +48,7 @@ export default function TranscriptionPanel({
           </p>
         ) : (
           transcriptions.map((t) => {
-            const mismatch = getMismatchForTranscription(t);
             const isActive = currentTime >= t.start_time && currentTime <= t.end_time;
-
-            if (mismatch) {
-              return (
-                <div
-                  key={t.id}
-                  ref={(element) => {
-                    transcriptionRefs.current[t.id] = element;
-                  }}
-                  className={`p-3 rounded-xl border-l-4 border-rose-500 transition-all ${
-                    isActive
-                      ? "bg-rose-500/10 dark:bg-rose-500/20 ring-2 ring-primary/30"
-                      : "bg-rose-500/5 dark:bg-rose-500/10"
-                  }`}
-                >
-                  <div className="flex justify-between items-start mb-1">
-                    <span className="text-[10px] text-rose-400 block uppercase font-bold">
-                      {t.speaker || "Speaker 1"} &bull; {formatTime(t.start_time)}
-                    </span>
-                    <span className="text-[9px] bg-rose-500 text-white px-1.5 rounded">
-                      MISMATCH
-                    </span>
-                  </div>
-                  <p className="text-sm leading-relaxed text-slate-600 dark:text-slate-300">
-                    {t.text}
-                  </p>
-                  <p className="text-[10px] mt-2 text-rose-400 italic">
-                    Subtitles say: &ldquo;{mismatch.subtitle_text}&rdquo;
-                  </p>
-                </div>
-              );
-            }
 
             return (
               <div
