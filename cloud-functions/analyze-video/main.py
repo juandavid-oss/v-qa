@@ -56,6 +56,9 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 SPELLCHECK_API_URL = os.environ.get("SPELLCHECK_API_URL", "https://api.api-ninjas.com/v1/spellcheck")
 SPELLCHECK_API_KEY = os.environ.get("SPELLCHECK_API_KEY")
+SPELLCHECK_MAX_WORKERS = max(1, int(os.environ.get("SPELLCHECK_MAX_WORKERS", "6")))
+SPELLCHECK_MAX_SEGMENTS = max(1, int(os.environ.get("SPELLCHECK_MAX_SEGMENTS", "120")))
+MISMATCH_MAX_SUBTITLES = max(1, int(os.environ.get("MISMATCH_MAX_SUBTITLES", "500")))
 CLOUD_FUNCTION_SECRET = os.environ.get("CLOUD_FUNCTION_SECRET")
 MIN_SUBTITLE_CONFIDENCE = float(os.environ.get("MIN_SUBTITLE_CONFIDENCE", "0.9"))
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
@@ -1366,85 +1369,117 @@ def _prepare_spellcheck_text(text: str) -> str:
     return value
 
 
+def _check_spelling_item(item: dict) -> tuple[list[dict], str | None, dict | None]:
+    raw_text = item.get("text", "")
+    timestamp = item.get("start_time", 0)
+    detection_id = item.get("detection_id")
+    if not raw_text or not raw_text.strip():
+        return [], detection_id, None
+
+    # Keep apostrophes so contractions don't become false positives (e.g. I've -> Ive).
+    text = _prepare_spellcheck_text(raw_text)
+    if not text:
+        return [], detection_id, None
+
+    response = requests.get(
+        SPELLCHECK_API_URL,
+        headers={"X-Api-Key": SPELLCHECK_API_KEY},
+        params={"text": text},
+        timeout=30,
+    )
+
+    response_payload: dict = {}
+    if response.status_code == 200:
+        parsed = response.json()
+        response_payload = parsed if isinstance(parsed, dict) else {}
+    else:
+        print(
+            f"Spellcheck API request failed (status={response.status_code}) for text: {text[:120]}",
+            flush=True,
+        )
+
+    corrections = response_payload.get("corrections", [])
+    if not isinstance(corrections, list):
+        corrections = []
+
+    debug_entry = {
+        "provider": "api_ninjas",
+        "request_text": text,
+        "status_code": response.status_code,
+        "response_json": response_payload,
+        "correction_count": len(corrections),
+    }
+
+    if response.status_code != 200:
+        return [], detection_id, debug_entry
+
+    errors: list[dict] = []
+    for correction in corrections:
+        if not isinstance(correction, dict):
+            continue
+        original_word = read_string(correction.get("word"))
+        if not original_word:
+            continue
+        suggested = read_string(correction.get("correction"))
+        candidates = correction.get("candidates", [])
+        if not suggested and isinstance(candidates, list) and candidates:
+            suggested = read_string(candidates[0])
+        if not suggested:
+            suggested = original_word
+
+        original_norm = _normalize_spell_token(original_word)
+        suggested_norm = _normalize_spell_token(suggested)
+        errors.append({
+            "original_text": original_word,
+            "suggested_text": suggested,
+            "context": raw_text,
+            "timestamp": timestamp,
+            "detection_id": detection_id,
+            "rule_id": "API_NINJAS_SPELLCHECK",
+            "source": "subtitle",
+            "has_replacement": bool(original_norm and suggested_norm and suggested_norm != original_norm),
+        })
+
+    return errors, detection_id, debug_entry
+
+
 def check_spelling(
     texts: list[dict],
     debug_by_detection_id: dict[str, list[dict]] | None = None,
+    max_workers: int | None = None,
 ) -> list[dict]:
     """Check typos with API Ninjas Spellcheck (send whole subtitle sentence)."""
-    errors = []
+    errors: list[dict] = []
 
     if not SPELLCHECK_API_KEY:
         raise ValueError("SPELLCHECK_API_KEY is not configured")
 
-    for item in texts:
-        raw_text = item["text"]
-        timestamp = item.get("start_time", 0)
-        detection_id = item.get("detection_id")
-        if not raw_text or not raw_text.strip():
-            continue
+    if not texts:
+        return errors
 
-        # Keep apostrophes so contractions don't become false positives (e.g. I've -> Ive).
-        text = _prepare_spellcheck_text(raw_text)
-        if not text:
-            continue
+    worker_count = max_workers if isinstance(max_workers, int) and max_workers > 0 else SPELLCHECK_MAX_WORKERS
+    worker_count = max(1, min(worker_count, len(texts)))
 
-        response = requests.get(
-            SPELLCHECK_API_URL,
-            headers={"X-Api-Key": SPELLCHECK_API_KEY},
-            params={"text": text},
-            timeout=30,
-        )
-        response_payload: dict = {}
-        if response.status_code == 200:
-            parsed = response.json()
-            response_payload = parsed if isinstance(parsed, dict) else {}
-        else:
-            print(
-                f"Spellcheck API request failed (status={response.status_code}) for text: {text[:120]}",
-                flush=True,
-            )
+    future_to_idx: dict[concurrent.futures.Future, int] = {}
+    ordered_results: dict[int, tuple[list[dict], str | None, dict | None]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        for idx, item in enumerate(texts):
+            future = executor.submit(_check_spelling_item, item)
+            future_to_idx[future] = idx
 
-        corrections = response_payload.get("corrections", [])
-        if not isinstance(corrections, list):
-            corrections = []
+        for future in concurrent.futures.as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                ordered_results[idx] = future.result()
+            except Exception as error:
+                print(f"Spellcheck worker error: {error}", flush=True)
+                ordered_results[idx] = ([], None, None)
 
-        if debug_by_detection_id is not None and detection_id:
-            debug_by_detection_id.setdefault(detection_id, []).append({
-                "provider": "api_ninjas",
-                "request_text": text,
-                "status_code": response.status_code,
-                "response_json": response_payload,
-                "correction_count": len(corrections),
-            })
-
-        if response.status_code != 200:
-            continue
-
-        for correction in corrections:
-            if not isinstance(correction, dict):
-                continue
-            original_word = read_string(correction.get("word"))
-            if not original_word:
-                continue
-            suggested = read_string(correction.get("correction"))
-            candidates = correction.get("candidates", [])
-            if not suggested and isinstance(candidates, list) and candidates:
-                suggested = read_string(candidates[0])
-            if not suggested:
-                suggested = original_word
-
-            original_norm = _normalize_spell_token(original_word)
-            suggested_norm = _normalize_spell_token(suggested)
-            errors.append({
-                "original_text": original_word,
-                "suggested_text": suggested,
-                "context": raw_text,
-                "timestamp": timestamp,
-                "detection_id": detection_id,
-                "rule_id": "API_NINJAS_SPELLCHECK",
-                "source": "subtitle",
-                "has_replacement": bool(original_norm and suggested_norm and suggested_norm != original_norm),
-            })
+    for idx in range(len(texts)):
+        item_errors, detection_id, debug_entry = ordered_results.get(idx, ([], None, None))
+        if debug_by_detection_id is not None and detection_id and debug_entry:
+            debug_by_detection_id.setdefault(detection_id, []).append(debug_entry)
+        errors.extend(item_errors)
 
     return errors
 
@@ -1646,6 +1681,16 @@ def _collect_word_windows_for_range(start: float, end: float, word_windows: list
     ]
 
 
+def _collect_word_windows_by_start_time(start: float, end: float, word_windows: list[dict]) -> list[dict]:
+    if end <= start:
+        return []
+    return [
+        window
+        for window in word_windows
+        if start <= window["start_time"] < end
+    ]
+
+
 def _collect_aligned_tokens_for_window(start: float, end: float, token_windows: list[dict]) -> list[str]:
     if end <= start:
         return []
@@ -1809,7 +1854,7 @@ def build_sync_report_window_containment(
 
         window_start = max(0.0, subtitle_start - safe_before)
         window_end = subtitle_end + safe_after
-        window_rows = _collect_word_windows_for_range(window_start, window_end, word_windows)
+        window_rows = _collect_word_windows_by_start_time(window_start, window_end, word_windows)
 
         window_tokens = [str(row.get("token") or "") for row in window_rows if str(row.get("token") or "")]
         window_raw_tokens = [str(row.get("raw") or "") for row in window_rows if str(row.get("raw") or "")]
@@ -2047,6 +2092,79 @@ def _compare_subtitles_for_join(a: dict, b: dict) -> int:
     if a_text > b_text:
         return 1
     return 0
+
+
+def detect_mismatches_fast_containment(
+    subtitles: list[dict],
+    transcriptions: list[dict],
+    transcription_words: list[dict] | None = None,
+    window_before_seconds: float = CONTAINMENT_WINDOW_SECONDS_BEFORE,
+    window_after_seconds: float = CONTAINMENT_WINDOW_SECONDS_AFTER,
+    max_subtitles: int = MISMATCH_MAX_SUBTITLES,
+) -> tuple[list[dict], dict]:
+    """Fast mismatch detection using subtitle containment in a time window.
+
+    This is optimized for the main analyze pipeline:
+    - No offset scanning
+    - No edit distance
+    - No overlap/duplicate checks
+    """
+    safe_before = max(0.0, float(window_before_seconds))
+    safe_after = max(0.0, float(window_after_seconds))
+    safe_limit = max(1, int(max_subtitles))
+
+    subtitles_total = len(subtitles)
+    subtitles_processed = min(subtitles_total, safe_limit)
+    cap_applied = subtitles_total > subtitles_processed
+
+    evaluated = subtitles[:subtitles_processed]
+    word_windows = _build_transcription_word_windows(transcriptions, transcription_words)
+    words_source = "raw_words" if transcription_words else "segments_fallback"
+
+    mismatches: list[dict] = []
+    for subtitle in evaluated:
+        subtitle_text = read_string(subtitle.get("text")) or ""
+        subtitle_start = _to_float(subtitle.get("start_time"), 0.0)
+        subtitle_end = _to_float(subtitle.get("end_time"), subtitle_start)
+        if subtitle_end < subtitle_start:
+            subtitle_start, subtitle_end = subtitle_end, subtitle_start
+
+        subtitle_normalized = _normalize_text_for_sync(subtitle_text)
+        window_start = max(0.0, subtitle_start - safe_before)
+        window_end = subtitle_end + safe_after
+
+        window_rows = _collect_word_windows_by_start_time(window_start, window_end, word_windows)
+        window_raw_tokens = [str(row.get("raw") or "") for row in window_rows if str(row.get("raw") or "")]
+        window_text = " ".join(window_raw_tokens).strip()
+        window_normalized = _normalize_text_for_sync(window_text)
+        is_contained = bool(subtitle_normalized) and subtitle_normalized in window_normalized
+        if is_contained:
+            continue
+
+        mismatch_type = "subtitle_not_contained_in_window"
+        matched_text = window_text or "[no transcription in window]"
+        if not subtitle_text.strip():
+            mismatch_type = "empty_subtitle_text"
+        elif not window_rows:
+            mismatch_type = "no_overlapping_transcription"
+
+        mismatches.append({
+            "subtitle_text": subtitle_text,
+            "transcription_text": matched_text,
+            "start_time": subtitle_start,
+            "end_time": subtitle_end,
+            "severity": "high",
+            "mismatch_type": mismatch_type,
+        })
+
+    return mismatches, {
+        "subtitles_total": subtitles_total,
+        "subtitles_processed": subtitles_processed,
+        "cap_applied": cap_applied,
+        "words_source": words_source,
+        "window_before_seconds": safe_before,
+        "window_after_seconds": safe_after,
+    }
 
 
 def detect_mismatches(
@@ -2700,6 +2818,7 @@ def analyze_video(request):
                 raise ValueError("No video URL available; resolve Frame.io metadata before triggering analysis")
 
             clear_previous_results(supabase, project_id)
+            stage_durations: dict[str, float] = {}
 
             # ── Step 1: Download video ──────────────────────────────
             t1 = time.time()
@@ -2708,6 +2827,7 @@ def analyze_video(request):
             video_path = download_video(video_url, tmp_dir)
             file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
             elapsed = time.time() - t1
+            stage_durations["fetching_video"] = elapsed
             update_status(supabase, project_id, "fetching_video", 15,
                           f"Video downloaded: {file_size_mb:.1f} MB in {elapsed:.1f}s", debug_lines=debug_lines)
 
@@ -2720,6 +2840,7 @@ def analyze_video(request):
                 debug_logger=make_step_logger("detecting_text", 20),
             )
             elapsed = time.time() - t2
+            stage_durations["detecting_text"] = elapsed
             update_status(supabase, project_id, "detecting_text", 30,
                           f"Video Intelligence done: {len(raw_detections)} raw text detections in {elapsed:.1f}s", debug_lines=debug_lines)
 
@@ -2763,6 +2884,7 @@ def analyze_video(request):
             )
             transcription_segments = split_transcription_segments(raw_transcription_segments)
             elapsed = time.time() - t3
+            stage_durations["transcribing_audio"] = elapsed
             store_transcriptions(supabase, project_id, transcription_segments)
             try:
                 transcription_raw_meta = save_transcription_raw_to_storage(
@@ -2794,42 +2916,111 @@ def analyze_video(request):
 
             # ── Step 4: Check spelling (API Ninjas) ─────────────────
             t4 = time.time()
-            subtitle_texts = [
+            subtitle_texts_all = [
                 {"text": d["text"], "start_time": d["start_time"]}
                 for d in build_filtered_subtitles(classified)
             ]
+            subtitle_texts = subtitle_texts_all[:SPELLCHECK_MAX_SEGMENTS]
+            spellcheck_cap_applied = len(subtitle_texts_all) > len(subtitle_texts)
+            spellcheck_workers = max(1, min(SPELLCHECK_MAX_WORKERS, len(subtitle_texts) if subtitle_texts else 1))
             update_status(supabase, project_id, "checking_spelling", 70,
-                          f"Checking spelling on {len(subtitle_texts)} subtitle segments...", debug_lines=debug_lines)
-            spelling_errors = check_spelling(subtitle_texts)
+                          (
+                              "Checking spelling on subtitle segments "
+                              f"(total={len(subtitle_texts_all)}, processed={len(subtitle_texts)}, "
+                              f"workers={spellcheck_workers})..."
+                          ),
+                          debug_lines=debug_lines)
+            spelling_errors = check_spelling(
+                subtitle_texts,
+                max_workers=SPELLCHECK_MAX_WORKERS,
+            )
             filtered_errors = filter_false_positives(spelling_errors, classified)
             store_spelling_errors(supabase, project_id, filtered_errors)
             elapsed = time.time() - t4
+            stage_durations["checking_spelling"] = elapsed
+            if spellcheck_cap_applied:
+                append_debug_log_line(
+                    supabase=supabase,
+                    project_id=project_id,
+                    debug_lines=debug_lines,
+                    level="DEBUG",
+                    status="checking_spelling",
+                    progress=80,
+                    message=(
+                        "SPELLCHECK_SEGMENT_CAP_APPLIED: "
+                        f"total={len(subtitle_texts_all)} processed={len(subtitle_texts)} "
+                        f"cap={SPELLCHECK_MAX_SEGMENTS}"
+                    ),
+                )
             update_status(supabase, project_id, "checking_spelling", 80,
-                          f"Spelling done: {len(spelling_errors)} raw, {len(filtered_errors)} after filtering in {elapsed:.1f}s", debug_lines=debug_lines)
+                          (
+                              "Spelling done: "
+                              f"{len(spelling_errors)} raw, {len(filtered_errors)} after filtering in {elapsed:.1f}s "
+                              f"(processed={len(subtitle_texts)}, workers={spellcheck_workers})"
+                          ),
+                          debug_lines=debug_lines)
 
             # ── Step 5: Detect mismatches ───────────────────────────
             t5 = time.time()
-            update_status(supabase, project_id, "detecting_mismatches", 85,
-                          "Comparing subtitles against transcription...", debug_lines=debug_lines)
             filtered_subs = build_filtered_subtitles(classified)
-            mismatches = detect_mismatches(
+            mismatches_to_process = min(len(filtered_subs), MISMATCH_MAX_SUBTITLES)
+            mismatch_words_source = "raw_words" if transcription_words else "segments_fallback"
+            update_status(
+                supabase,
+                project_id,
+                "detecting_mismatches",
+                85,
+                (
+                    "Comparing subtitles against transcription "
+                    f"(total={len(filtered_subs)}, processed={mismatches_to_process}, "
+                    f"words_source={mismatch_words_source})..."
+                ),
+                debug_lines=debug_lines,
+            )
+            mismatches, mismatch_meta = detect_mismatches_fast_containment(
                 filtered_subs,
                 transcription_segments,
                 transcription_words=transcription_words,
+                max_subtitles=MISMATCH_MAX_SUBTITLES,
             )
             store_mismatches(supabase, project_id, mismatches)
             elapsed = time.time() - t5
+            stage_durations["detecting_mismatches"] = elapsed
+            if mismatch_meta["cap_applied"]:
+                append_debug_log_line(
+                    supabase=supabase,
+                    project_id=project_id,
+                    debug_lines=debug_lines,
+                    level="DEBUG",
+                    status="detecting_mismatches",
+                    progress=95,
+                    message=(
+                        "MISMATCH_SUBTITLE_CAP_APPLIED: "
+                        f"total={mismatch_meta['subtitles_total']} "
+                        f"processed={mismatch_meta['subtitles_processed']} "
+                        f"cap={MISMATCH_MAX_SUBTITLES}"
+                    ),
+                )
             update_status(supabase, project_id, "detecting_mismatches", 95,
-                          f"Mismatches done: {len(mismatches)} found in {elapsed:.1f}s", debug_lines=debug_lines)
+                          (
+                              f"Mismatches done: {len(mismatches)} found in {elapsed:.1f}s "
+                              f"(processed={mismatch_meta['subtitles_processed']}, "
+                              f"words_source={mismatch_meta['words_source']})"
+                          ),
+                          debug_lines=debug_lines)
 
             # ── Done ────────────────────────────────────────────────
             total_elapsed = time.time() - t0
+            breakdown = ", ".join(
+                f"{stage}={duration:.1f}s"
+                for stage, duration in stage_durations.items()
+            )
             update_status(
                 supabase,
                 project_id,
                 "completed",
                 100,
-                f"Analysis completed in {total_elapsed:.1f}s",
+                f"Analysis completed in {total_elapsed:.1f}s ({breakdown})",
                 debug_lines=debug_lines,
             )
             print(f"analyze_video COMPLETED in {total_elapsed:.1f}s", flush=True)
