@@ -25,6 +25,9 @@ export interface Project {
   ocr_raw_storage_path?: string | null;
   ocr_raw_generated_at?: string | null;
   ocr_raw_size_bytes?: number | null;
+  transcription_raw_storage_path?: string | null;
+  transcription_raw_generated_at?: string | null;
+  transcription_raw_size_bytes?: number | null;
   created_at: string;
   updated_at: string;
 }

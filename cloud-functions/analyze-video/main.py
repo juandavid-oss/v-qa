@@ -1040,7 +1040,7 @@ def _extract_words_from_v2_results(results) -> list[dict]:
     return words
 
 
-def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0) -> list[dict]:
+def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0) -> tuple[list[dict], dict]:
     """Transcribe audio using Google Cloud Speech-to-Text V2 (chirp_3).
 
     Uses synchronous `recognize` for audio ≤60s and
@@ -1075,6 +1075,8 @@ def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0)
         ),
     )
 
+    raw_payload: dict = {}
+
     if duration_seconds > 60:
         # batch_recognize requires audio via GCS URI
         from google.cloud import storage as gcs
@@ -1102,6 +1104,10 @@ def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0)
             print("Speech-to-Text V2: using batch_recognize...", flush=True)
             operation = client.batch_recognize(request=request)
             response = operation.result(timeout=600)
+            raw_payload = MessageToDict(
+                response._pb,
+                preserving_proto_field_name=True,
+            ) if hasattr(response, "_pb") else {}
 
             # batch_recognize response: results keyed by URI
             transcript = response.results[gcs_uri].transcript
@@ -1123,6 +1129,10 @@ def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0)
         )
         print("Speech-to-Text V2: using synchronous recognize...", flush=True)
         response = client.recognize(request=request)
+        raw_payload = MessageToDict(
+            response._pb,
+            preserving_proto_field_name=True,
+        ) if hasattr(response, "_pb") else {}
         words = _extract_words_from_v2_results(response.results)
 
     print(f"Speech-to-Text V2: got {len(words)} words", flush=True)
@@ -1130,7 +1140,7 @@ def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0)
     # Group words into segments
     segments = _group_words_into_segments(words)
     print(f"Speech-to-Text V2: grouped into {len(segments)} segments", flush=True)
-    return segments
+    return segments, raw_payload
 
 
 def split_transcription_segments(segments: list[dict]) -> list[dict]:
@@ -1805,6 +1815,51 @@ def save_ocr_raw_to_storage(project_id: str, video_url: str | None, raw_payload:
     }
 
 
+def save_transcription_raw_to_storage(project_id: str, video_url: str | None, raw_payload: dict) -> dict | None:
+    """Persist raw transcription payload to Supabase Storage as latest.json."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        print("Skipping transcription raw save: Supabase env missing", flush=True)
+        return None
+
+    generated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    object_path = f"projects/{project_id}/transcription-raw/latest.json"
+    raw_document = {
+        "version": 1,
+        "source": "google_speech_to_text_v2",
+        "project_id": project_id,
+        "generated_at": generated_at,
+        "video_url": video_url,
+        "raw_response": raw_payload,
+    }
+
+    body = json.dumps(raw_document, ensure_ascii=False).encode("utf-8")
+    upload_url = f"{SUPABASE_URL}/storage/v1/object/transcription-raw/{object_path}"
+    response = requests.post(
+        upload_url,
+        headers={
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            "apikey": SUPABASE_SERVICE_KEY,
+            "x-upsert": "true",
+            "Content-Type": "application/json",
+        },
+        data=body,
+        timeout=60,
+    )
+
+    if response.status_code >= 400:
+        print(
+            f"Failed to upload transcription raw payload (status={response.status_code} body={response.text[:300]})",
+            flush=True,
+        )
+        return None
+
+    return {
+        "storage_path": object_path,
+        "generated_at": generated_at,
+        "size_bytes": len(body),
+    }
+
+
 def update_project_ocr_raw_metadata(supabase, project_id: str, raw_meta: dict):
     if not raw_meta:
         return
@@ -1812,6 +1867,16 @@ def update_project_ocr_raw_metadata(supabase, project_id: str, raw_meta: dict):
         "ocr_raw_storage_path": raw_meta["storage_path"],
         "ocr_raw_generated_at": raw_meta["generated_at"],
         "ocr_raw_size_bytes": raw_meta["size_bytes"],
+    }).eq("id", project_id).execute()
+
+
+def update_project_transcription_raw_metadata(supabase, project_id: str, raw_meta: dict):
+    if not raw_meta:
+        return
+    supabase.table("projects").update({
+        "transcription_raw_storage_path": raw_meta["storage_path"],
+        "transcription_raw_generated_at": raw_meta["generated_at"],
+        "transcription_raw_size_bytes": raw_meta["size_bytes"],
     }).eq("id", project_id).execute()
 
 
@@ -2189,10 +2254,22 @@ def analyze_video(request):
 
             update_status(supabase, project_id, "transcribing_audio", 55,
                           "Sending audio to Speech-to-Text for transcription...")
-            raw_transcription_segments = transcribe_with_speech_to_text(audio_path, video_duration)
+            raw_transcription_segments, raw_transcription_payload = transcribe_with_speech_to_text(audio_path, video_duration)
             transcription_segments = split_transcription_segments(raw_transcription_segments)
             elapsed = time.time() - t3
             store_transcriptions(supabase, project_id, transcription_segments)
+            try:
+                transcription_raw_meta = save_transcription_raw_to_storage(
+                    project_id=project_id,
+                    video_url=video_url,
+                    raw_payload=raw_transcription_payload,
+                )
+                update_project_transcription_raw_metadata(supabase, project_id, transcription_raw_meta)
+            except Exception as transcription_raw_error:
+                print(
+                    f"WARNING: could not persist transcription raw payload (project_id={project_id}): {transcription_raw_error}",
+                    flush=True,
+                )
             update_status(supabase, project_id, "transcribing_audio", 65,
                           (
                               "Transcription done: "
