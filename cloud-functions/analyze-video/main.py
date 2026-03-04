@@ -969,93 +969,117 @@ def _group_words_into_segments(words: list[dict]) -> list[dict]:
     return segments
 
 
-def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0) -> list[dict]:
-    """Transcribe audio using Google Cloud Speech-to-Text V1.
-
-    Uses synchronous `recognize` for short audio (≤60s) and
-    `long_running_recognize` with GCS upload for longer audio.
-    """
-    from google.cloud import speech_v1 as speech
-    from google.cloud import storage as gcs
-
-    client = speech.SpeechClient()
-
-    # Choose model based on video duration
-    model = "short" if duration_seconds <= 60 else "long"
-    print(f"Speech-to-Text: using model '{model}' for {duration_seconds:.1f}s audio", flush=True)
-
-    diarization_config = speech.SpeakerDiarizationConfig(
-        enable_speaker_diarization=True,
-        min_speaker_count=1,
-        max_speaker_count=6,
-    )
-
-    config = speech.RecognitionConfig(
-        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-        sample_rate_hertz=16000,
-        language_code="en-US",
-        model=model,
-        enable_automatic_punctuation=True,
-        enable_word_time_offsets=True,
-        diarization_config=diarization_config,
-    )
-
-    gcs_uri = None
-    try:
-        if duration_seconds > 60:
-            # long_running_recognize requires audio via GCS URI
-            project_id = GCP_PROJECT_ID
-            bucket_name = f"{project_id}-vqa-tmp" if project_id else "vqa-speech-tmp"
-            blob_name = f"speech-tmp/{uuid.uuid4()}.wav"
-            gcs_uri = f"gs://{bucket_name}/{blob_name}"
-
-            print(f"Speech-to-Text: uploading audio to {gcs_uri}...", flush=True)
-            storage_client = gcs.Client()
-            bucket = storage_client.bucket(bucket_name)
-            blob = bucket.blob(blob_name)
-            blob.upload_from_filename(audio_path)
-
-            audio = speech.RecognitionAudio(uri=gcs_uri)
-            print("Speech-to-Text: using long_running_recognize...", flush=True)
-            operation = client.long_running_recognize(config=config, audio=audio)
-            response = operation.result(timeout=600)
-        else:
-            with open(audio_path, "rb") as f:
-                audio_content = f.read()
-            audio = speech.RecognitionAudio(content=audio_content)
-            print("Speech-to-Text: using synchronous recognize...", flush=True)
-            response = client.recognize(config=config, audio=audio)
-    finally:
-        # Clean up temporary GCS file
-        if gcs_uri:
-            try:
-                blob.delete()
-                print(f"Speech-to-Text: cleaned up {gcs_uri}", flush=True)
-            except Exception:
-                pass
-
-    # Extract word-level results with timestamps and speaker tags
+def _extract_words_from_v2_results(results) -> list[dict]:
+    """Extract word-level data from Speech-to-Text V2 results."""
     words: list[dict] = []
-    for result in response.results:
+    for result in results:
         alt = result.alternatives[0] if result.alternatives else None
         if not alt:
             continue
         for word_info in alt.words:
-            start_s = word_info.start_time.total_seconds()
-            end_s = word_info.end_time.total_seconds()
+            start_s = word_info.start_offset.total_seconds() if word_info.start_offset else 0.0
+            end_s = word_info.end_offset.total_seconds() if word_info.end_offset else start_s
+            speaker = word_info.speaker_label if word_info.speaker_label else None
             words.append({
                 "word": word_info.word,
                 "start_time": start_s,
                 "end_time": end_s,
-                "confidence": alt.confidence,
-                "speaker": f"Speaker {word_info.speaker_tag}" if word_info.speaker_tag else None,
+                "confidence": alt.confidence if alt.confidence else None,
+                "speaker": f"Speaker {speaker}" if speaker else None,
             })
+    return words
 
-    print(f"Speech-to-Text: got {len(words)} words from {len(response.results)} results", flush=True)
+
+def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0) -> list[dict]:
+    """Transcribe audio using Google Cloud Speech-to-Text V2 (chirp_3).
+
+    Uses synchronous `recognize` for audio ≤60s and
+    `batch_recognize` with GCS upload for longer audio.
+    """
+    from google.cloud.speech_v2 import SpeechClient
+    from google.cloud.speech_v2.types import cloud_speech
+    from google.api_core.client_options import ClientOptions
+
+    region = "us"
+    project_id = GCP_PROJECT_ID
+    if not project_id:
+        raise ValueError("GCP_PROJECT_ID is not configured")
+
+    client = SpeechClient(
+        client_options=ClientOptions(
+            api_endpoint=f"{region}-speech.googleapis.com",
+        )
+    )
+
+    recognizer = f"projects/{project_id}/locations/{region}/recognizers/_"
+    print(f"Speech-to-Text V2: using chirp_3 for {duration_seconds:.1f}s audio", flush=True)
+
+    config = cloud_speech.RecognitionConfig(
+        auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
+        language_codes=["en-US"],
+        model="chirp_3",
+        features=cloud_speech.RecognitionFeatures(
+            enable_automatic_punctuation=True,
+            enable_word_time_offsets=True,
+            diarization_config=cloud_speech.SpeakerDiarizationConfig(),
+        ),
+    )
+
+    if duration_seconds > 60:
+        # batch_recognize requires audio via GCS URI
+        from google.cloud import storage as gcs
+
+        bucket_name = f"{project_id}-vqa-tmp"
+        blob_name = f"speech-tmp/{uuid.uuid4()}.wav"
+        gcs_uri = f"gs://{bucket_name}/{blob_name}"
+
+        print(f"Speech-to-Text V2: uploading audio to {gcs_uri}...", flush=True)
+        storage_client = gcs.Client()
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        blob.upload_from_filename(audio_path)
+
+        try:
+            file_metadata = cloud_speech.BatchRecognizeFileMetadata(uri=gcs_uri)
+            request = cloud_speech.BatchRecognizeRequest(
+                recognizer=recognizer,
+                config=config,
+                files=[file_metadata],
+                recognition_output_config=cloud_speech.RecognitionOutputConfig(
+                    inline_response_config=cloud_speech.InlineOutputConfig(),
+                ),
+            )
+            print("Speech-to-Text V2: using batch_recognize...", flush=True)
+            operation = client.batch_recognize(request=request)
+            response = operation.result(timeout=600)
+
+            # batch_recognize response: results keyed by URI
+            transcript = response.results[gcs_uri].transcript
+            words = _extract_words_from_v2_results(transcript.results)
+        finally:
+            try:
+                blob.delete()
+                print(f"Speech-to-Text V2: cleaned up {gcs_uri}", flush=True)
+            except Exception:
+                pass
+    else:
+        with open(audio_path, "rb") as f:
+            audio_content = f.read()
+
+        request = cloud_speech.RecognizeRequest(
+            recognizer=recognizer,
+            config=config,
+            content=audio_content,
+        )
+        print("Speech-to-Text V2: using synchronous recognize...", flush=True)
+        response = client.recognize(request=request)
+        words = _extract_words_from_v2_results(response.results)
+
+    print(f"Speech-to-Text V2: got {len(words)} words", flush=True)
 
     # Group words into segments
     segments = _group_words_into_segments(words)
-    print(f"Speech-to-Text: grouped into {len(segments)} segments", flush=True)
+    print(f"Speech-to-Text V2: grouped into {len(segments)} segments", flush=True)
     return segments
 
 
