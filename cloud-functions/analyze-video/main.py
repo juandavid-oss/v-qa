@@ -1017,60 +1017,59 @@ def extract_audio(video_path: str, tmp_dir: str) -> str:
     return audio_path
 
 
-def _group_words_into_segments(words: list[dict]) -> list[dict]:
-    """Group word-level results into sentence/phrase segments.
+def _group_words_by_second(words: list[dict]) -> list[dict]:
+    """Group word-level transcription into 1-second buckets by word start_time.
 
-    Split on: speaker change, pause > 1.5s, sentence-ending punctuation, or max 8s duration.
+    Rule:
+    - bucket second = floor(start_time)
+    - segment window = [second, second + 1)
+    - no synthetic segments for silence
     """
     if not words:
         return []
 
-    segments: list[dict] = []
-    current_words: list[dict] = []
-    current_speaker: str | None = None
+    sorted_words = sorted(
+        words,
+        key=lambda w: (
+            float(w.get("start_time", 0.0)),
+            float(w.get("end_time", 0.0)),
+        ),
+    )
 
-    def _flush():
-        if not current_words:
-            return
-        text = " ".join(w["word"] for w in current_words)
-        confidences = [w["confidence"] for w in current_words if w.get("confidence") is not None]
+    buckets: dict[int, list[dict]] = {}
+    for word in sorted_words:
+        start_time = float(word.get("start_time", 0.0))
+        second = int(max(0, start_time // 1))
+        buckets.setdefault(second, []).append(word)
+
+    segments: list[dict] = []
+    for second in sorted(buckets.keys()):
+        bucket_words = buckets[second]
+        tokens = [str(w.get("word", "")).strip() for w in bucket_words if str(w.get("word", "")).strip()]
+        if not tokens:
+            continue
+
+        confidences = [
+            float(w["confidence"])
+            for w in bucket_words
+            if isinstance(w.get("confidence"), (int, float))
+        ]
+
+        speaker_counts: dict[str, int] = {}
+        for w in bucket_words:
+            speaker = w.get("speaker")
+            if isinstance(speaker, str) and speaker:
+                speaker_counts[speaker] = speaker_counts.get(speaker, 0) + 1
+        speaker = max(speaker_counts, key=speaker_counts.get) if speaker_counts else None
+
         segments.append({
-            "text": text,
-            "start_time": current_words[0]["start_time"],
-            "end_time": current_words[-1]["end_time"],
-            "speaker": current_speaker,
-            "confidence": sum(confidences) / len(confidences) if confidences else None,
+            "text": " ".join(tokens),
+            "start_time": float(second),
+            "end_time": float(second + 1),
+            "speaker": speaker,
+            "confidence": (sum(confidences) / len(confidences)) if confidences else None,
         })
 
-    for w in words:
-        speaker = w.get("speaker")
-        start = w["start_time"]
-
-        # Speaker change → flush
-        if current_words and speaker != current_speaker:
-            _flush()
-            current_words = []
-
-        # Pause > 1.5s → flush
-        if current_words and (start - current_words[-1]["end_time"]) > 1.5:
-            _flush()
-            current_words = []
-
-        # Max segment duration ~8s → flush
-        if current_words and (start - current_words[0]["start_time"]) > 8.0:
-            _flush()
-            current_words = []
-
-        current_speaker = speaker
-        current_words.append(w)
-
-        # Sentence-ending punctuation → flush
-        word_text = w.get("word", "")
-        if word_text and word_text[-1] in ".?!":
-            _flush()
-            current_words = []
-
-    _flush()
     return segments
 
 
@@ -1204,9 +1203,9 @@ def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0,
 
     _log(f"STT response IN words={len(words)}", level="DEBUG")
 
-    # Group words into segments
-    segments = _group_words_into_segments(words)
-    _log(f"STT response IN grouped_segments={len(segments)}", level="DEBUG")
+    # Group words into 1-second buckets for transcription panel sections.
+    segments = _group_words_by_second(words)
+    _log(f"STT response IN grouped_by_second_segments={len(segments)}", level="DEBUG")
     return segments, raw_payload
 
 
