@@ -33,9 +33,9 @@ function StatusBadge({ project }: { project: Project }) {
 
   if (status === "pending") {
     return (
-      <span className="status-badge bg-slate-500/10 text-slate-500 border-slate-500/20 backdrop-blur-md">
-        <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
-        Pending
+      <span className="status-badge bg-rose-500/10 text-rose-500 border-rose-500/20 backdrop-blur-md">
+        <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+        Starting
       </span>
     );
   }

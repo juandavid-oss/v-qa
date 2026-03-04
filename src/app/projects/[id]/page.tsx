@@ -18,6 +18,7 @@ import BrandNamesPanel from "@/components/dashboard/BrandNamesPanel";
 import ProcessingOverlay from "@/components/dashboard/ProcessingOverlay";
 
 const MIN_SUBTITLE_CONFIDENCE = 0.9;
+const SYNC_TIME_TOLERANCE_SECONDS = 0.25;
 
 function normalizeSyncText(text: string): string {
   return text
@@ -27,11 +28,14 @@ function normalizeSyncText(text: string): string {
     .trim();
 }
 
-function subtitleMatchesTranscription(subtitle: TextDetection, transcription: Transcription): boolean {
-  const subtitleNorm = normalizeSyncText(subtitle.text);
-  const transcriptionNorm = normalizeSyncText(transcription.text);
-  if (!subtitleNorm || !transcriptionNorm) return false;
-  return transcriptionNorm.includes(subtitleNorm);
+function rangesOverlapWithTolerance(
+  aStart: number,
+  aEnd: number,
+  bStart: number,
+  bEnd: number,
+  tolerance = SYNC_TIME_TOLERANCE_SECONDS
+): boolean {
+  return aStart <= bEnd + tolerance && aEnd >= bStart - tolerance;
 }
 
 export default function ProjectDetailPage() {
@@ -268,19 +272,35 @@ export default function ProjectDetailPage() {
   }, [projectId, setProgress, setStatus, supabase]);
 
   const subtitleSyncById = useMemo(() => {
+    const hasSyncData =
+      status === "completed" &&
+      !loading &&
+      subtitles.length > 0 &&
+      (transcriptions.length > 0 || mismatches.length > 0);
+
+    if (!hasSyncData) {
+      return {};
+    }
+
     const result: Record<string, boolean> = {};
     for (const subtitle of subtitles) {
-      const isSynced = transcriptions.some((transcription) => {
-        const withinWindow =
-          subtitle.start_time >= transcription.start_time &&
-          subtitle.end_time <= transcription.end_time;
-        if (!withinWindow) return false;
-        return subtitleMatchesTranscription(subtitle, transcription);
+      const subtitleNorm = normalizeSyncText(subtitle.text);
+      const isUnsynced = mismatches.some((mismatch) => {
+        const subtitleMismatchNorm = normalizeSyncText(mismatch.subtitle_text || "");
+        if (!subtitleNorm || !subtitleMismatchNorm || subtitleNorm !== subtitleMismatchNorm) {
+          return false;
+        }
+        return rangesOverlapWithTolerance(
+          subtitle.start_time,
+          subtitle.end_time,
+          mismatch.start_time,
+          mismatch.end_time
+        );
       });
-      result[subtitle.id] = isSynced;
+      result[subtitle.id] = !isUnsynced;
     }
     return result;
-  }, [subtitles, transcriptions]);
+  }, [status, loading, subtitles, transcriptions.length, mismatches]);
 
   if (loading) {
     return (

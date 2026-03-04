@@ -123,7 +123,7 @@ export default function ProcessingOverlay({ status, progress, debugMessage }: Pr
             <span className="font-mono uppercase tracking-wider">Debug Log</span>
           </button>
           {showDebug && cleanDebug && (
-            <div className="mt-2 bg-slate-900/80 border border-slate-800 rounded-lg px-3 py-2">
+            <div className="mt-2 bg-slate-900/80 border border-slate-800 rounded-lg px-3 py-2 max-h-[160px] overflow-y-auto">
               <p className="text-xs font-mono text-amber-400/90 whitespace-pre-wrap break-words">
                 {cleanDebug}
               </p>
