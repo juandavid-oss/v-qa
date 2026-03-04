@@ -52,6 +52,7 @@ export default function ProjectCard({ project, onDelete }: ProjectCardProps) {
   const isProcessing = !["pending", "completed", "error"].includes(project.status);
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [thumbnailBroken, setThumbnailBroken] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -66,6 +67,10 @@ export default function ProjectCard({ project, onDelete }: ProjectCardProps) {
     }
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [menuOpen]);
+
+  useEffect(() => {
+    setThumbnailBroken(false);
+  }, [project.thumbnail_url]);
 
   const handleDelete = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -84,10 +89,11 @@ export default function ProjectCard({ project, onDelete }: ProjectCardProps) {
       <div className="group bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden hover:shadow-xl hover:shadow-primary/5 hover:border-primary/50 transition-all duration-300 cursor-pointer">
         {/* Thumbnail area */}
         <div className="relative aspect-video bg-slate-900 overflow-hidden">
-          {project.thumbnail_url ? (
+          {project.thumbnail_url && !thumbnailBroken ? (
             <img
               alt="Project Thumbnail"
               className="w-full h-full object-cover opacity-80 group-hover:opacity-60 group-hover:scale-105 transition-all duration-500"
+              onError={() => setThumbnailBroken(true)}
               src={project.thumbnail_url}
             />
           ) : (

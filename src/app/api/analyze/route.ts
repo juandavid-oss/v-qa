@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { parseFrameIoUrl, resolveFrameIoMetadata } from "@/lib/frame-io";
 import { FrameAuthError, getValidFrameToken } from "@/lib/frame-io-auth";
 import { getGcpIdentityToken } from "@/lib/gcp-auth";
+import { persistProjectThumbnail } from "@/lib/project-thumbnail";
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -49,6 +50,10 @@ export async function POST(request: Request) {
       const token = await getValidFrameToken();
       const metadata = await resolveFrameIoMetadata(assetId, token);
       resolvedVideoUrl = metadata.video_url;
+      const persistedThumbnailUrl = await persistProjectThumbnail(
+        project_id,
+        metadata.thumbnail_url,
+      );
 
       if (!resolvedVideoUrl) {
         throw new Error(
@@ -62,7 +67,7 @@ export async function POST(request: Request) {
         .update({
           frame_io_asset_id: metadata.asset_id,
           video_url: metadata.video_url,
-          thumbnail_url: metadata.thumbnail_url,
+          thumbnail_url: persistedThumbnailUrl,
           duration_seconds: metadata.duration,
           error_message: null,
         })

@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useEffect, useCallback } from "react";
+import { useRef, useEffect, useCallback, useState } from "react";
 import videojs from "video.js";
 import "video.js/dist/video-js.css";
 import { formatTimecode } from "@/lib/utils";
@@ -45,6 +45,16 @@ export default function VideoPreview({
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const playerRef = useRef<ReturnType<typeof videojs> | null>(null);
   const ignoreTimeUpdate = useRef(false);
+  const [videoError, setVideoError] = useState<string | null>(null);
+  const [thumbnailBroken, setThumbnailBroken] = useState(false);
+
+  useEffect(() => {
+    setVideoError(null);
+  }, [videoUrl]);
+
+  useEffect(() => {
+    setThumbnailBroken(false);
+  }, [thumbnailUrl]);
 
   // Initialize video.js player
   useEffect(() => {
@@ -97,6 +107,14 @@ export default function VideoPreview({
       const t = player.currentTime() || 0;
       onTimeUpdate(t);
       if (onSeek) onSeek(t);
+    });
+
+    player.on("loadedmetadata", () => {
+      setVideoError(null);
+    });
+
+    player.on("error", () => {
+      setVideoError("Video URL expirada, datos del proyecto disponibles.");
     });
 
     return () => {
@@ -219,15 +237,21 @@ export default function VideoPreview({
           </span>
         </div>
         {videoUrl ? (
-          <div className="h-full w-full bg-black rounded-2xl border border-slate-800 overflow-hidden">
+          <div className="h-full w-full bg-black rounded-2xl border border-slate-800 overflow-hidden relative">
             <div ref={videoContainerRef} className="h-full w-full" />
+            {videoError && (
+              <div className="absolute bottom-3 left-3 right-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                {videoError}
+              </div>
+            )}
           </div>
-        ) : thumbnailUrl ? (
+        ) : thumbnailUrl && !thumbnailBroken ? (
           <div className="h-full w-full bg-black rounded-2xl overflow-hidden border border-slate-800">
             <div className="relative bg-black h-full w-full">
               <img
                 alt="Video frame preview"
                 className="w-full h-full object-contain opacity-80 bg-black"
+                onError={() => setThumbnailBroken(true)}
                 src={thumbnailUrl}
               />
             </div>

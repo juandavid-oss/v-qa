@@ -267,6 +267,21 @@ export default function ProjectDetailPage() {
     }
   }, [projectId, setProgress, setStatus, supabase]);
 
+  const subtitleSyncById = useMemo(() => {
+    const result: Record<string, boolean> = {};
+    for (const subtitle of subtitles) {
+      const isSynced = transcriptions.some((transcription) => {
+        const withinWindow =
+          subtitle.start_time >= transcription.start_time &&
+          subtitle.end_time <= transcription.end_time;
+        if (!withinWindow) return false;
+        return subtitleMatchesTranscription(subtitle, transcription);
+      });
+      result[subtitle.id] = isSynced;
+    }
+    return result;
+  }, [subtitles, transcriptions]);
+
   if (loading) {
     return (
       <div className="flex flex-col min-h-screen">
@@ -297,21 +312,6 @@ export default function ProjectDetailPage() {
   const panelDetections = subtitles.length > 0 ? subtitles : fixedTexts;
   const showingOnScreenFallback = subtitles.length === 0 && fixedTexts.length > 0;
   const panelHeightClass = "h-[600px]";
-
-  const subtitleSyncById = useMemo(() => {
-    const result: Record<string, boolean> = {};
-    for (const subtitle of subtitles) {
-      const isSynced = transcriptions.some((transcription) => {
-        const withinWindow =
-          subtitle.start_time >= transcription.start_time &&
-          subtitle.end_time <= transcription.end_time;
-        if (!withinWindow) return false;
-        return subtitleMatchesTranscription(subtitle, transcription);
-      });
-      result[subtitle.id] = isSynced;
-    }
-    return result;
-  }, [subtitles, transcriptions]);
 
   return (
     <div className="flex flex-col min-h-screen relative">
