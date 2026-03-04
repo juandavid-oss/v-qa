@@ -88,6 +88,14 @@ interface SyncReportDetail {
   edit_distance: number;
   status: "SYNCED" | "LIKELY_SYNCED" | "MISALIGNED";
   issues: string[];
+  subtitle_segment_start_seconds?: number;
+  subtitle_segment_end_seconds?: number;
+  transcription_window_start_seconds?: number;
+  transcription_window_end_seconds?: number;
+  transcription_window_text?: string;
+  subtitle_text_normalized?: string;
+  transcription_window_text_normalized?: string;
+  subtitle_contained_in_window?: boolean;
 }
 
 interface SyncReportDuplicate {
@@ -599,7 +607,7 @@ export default function OcrTestingPage() {
                 <div className="grid grid-cols-2 md:grid-cols-7 gap-3 text-sm mb-4">
                   <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Total: <b>{result.sync_report.summary.total_subtitles}</b></div>
                   <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Synced: <b>{result.sync_report.summary.synced}</b></div>
-                  <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Slightly synced: <b>{result.sync_report.summary.likely_synced}</b></div>
+                  <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Slightly synced (legacy): <b>{result.sync_report.summary.likely_synced}</b></div>
                   <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Unsynced: <b>{result.sync_report.summary.misaligned}</b></div>
                   <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Duplicates: <b>{result.sync_report.summary.duplicates_found}</b></div>
                   <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Avg overlap: <b>{result.sync_report.summary.avg_word_overlap_ratio.toFixed(3)}</b></div>
@@ -611,30 +619,49 @@ export default function OcrTestingPage() {
                     <thead className="text-left text-xs uppercase text-slate-500">
                       <tr>
                         <th className="py-2 pr-4">#</th>
-                        <th className="py-2 pr-4">Time</th>
+                        <th className="py-2 pr-4">Subtitle Time</th>
+                        <th className="py-2 pr-4">Subtitle Segment</th>
+                        <th className="py-2 pr-4">Transcription Window</th>
+                        <th className="py-2 pr-4">Window Time</th>
+                        <th className="py-2 pr-4">Contained</th>
                         <th className="py-2 pr-4">Status</th>
-                        <th className="py-2 pr-4">Overlap</th>
-                        <th className="py-2 pr-4">Edit Dist</th>
-                        <th className="py-2 pr-4">Subtitle</th>
-                        <th className="py-2 pr-4">Matched ASR</th>
                         <th className="py-2">Issues</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {result.sync_report.details.map((detail) => (
-                        <tr key={`sync_${detail.subtitle_index}`} className="border-t border-slate-200 dark:border-slate-800">
+                      {result.sync_report.details.map((detail) => {
+                        const subtitleStart = detail.subtitle_segment_start_seconds ?? detail.subtitle_time_seconds[0];
+                        const subtitleEnd = detail.subtitle_segment_end_seconds ?? detail.subtitle_time_seconds[1];
+                        const windowStart = detail.transcription_window_start_seconds ?? subtitleStart;
+                        const windowEnd = detail.transcription_window_end_seconds ?? subtitleEnd;
+                        const contained = detail.subtitle_contained_in_window ?? false;
+                        const subtitleNormalized = detail.subtitle_text_normalized ?? "-";
+                        const windowText = detail.transcription_window_text || detail.matched_transcription_text || "-";
+                        const windowNormalized = detail.transcription_window_text_normalized ?? "-";
+                        return (
+                        <tr key={`sync_${detail.subtitle_index}`} className="border-t border-slate-200 dark:border-slate-800 align-top">
                           <td className="py-2 pr-4 font-mono text-xs">{detail.subtitle_index + 1}</td>
                           <td className="py-2 pr-4 font-mono text-xs">
-                            {formatTimecode(detail.subtitle_time_seconds[0])} - {formatTimecode(detail.subtitle_time_seconds[1])}
+                            {formatTimecode(subtitleStart)} - {formatTimecode(subtitleEnd)}
+                          </td>
+                          <td className="py-2 pr-4">
+                            <div>{detail.subtitle_text || "-"}</div>
+                            <div className="font-mono text-xs text-slate-500">norm: {subtitleNormalized || "-"}</div>
+                          </td>
+                          <td className="py-2 pr-4">
+                            <div>{windowText}</div>
+                            <div className="font-mono text-xs text-slate-500">norm: {windowNormalized || "-"}</div>
+                          </td>
+                          <td className="py-2 pr-4 font-mono text-xs">
+                            {formatTimecode(windowStart)} - {formatTimecode(windowEnd)}
+                          </td>
+                          <td className="py-2 pr-4">
+                            {contained ? "Yes" : "No"}
                           </td>
                           <td className="py-2 pr-4">{syncStatusLabel(detail.status)}</td>
-                          <td className="py-2 pr-4">{detail.word_overlap_ratio.toFixed(3)}</td>
-                          <td className="py-2 pr-4">{detail.edit_distance}</td>
-                          <td className="py-2 pr-4">{detail.subtitle_text}</td>
-                          <td className="py-2 pr-4">{detail.matched_transcription_text || "-"}</td>
                           <td className="py-2">{detail.issues.length > 0 ? detail.issues.join(" | ") : "-"}</td>
                         </tr>
-                      ))}
+                      )})}
                     </tbody>
                   </table>
                 </div>

@@ -1502,6 +1502,8 @@ SYNCED_TIME_THRESHOLD_SECONDS = 1.5
 LIKELY_SYNCED_TIME_THRESHOLD_SECONDS = 2.0
 OFFSET_SCAN_WINDOW_SECONDS = 2.0
 OFFSET_SCAN_STEP_SECONDS = 0.1
+CONTAINMENT_WINDOW_SECONDS_BEFORE = 1.5
+CONTAINMENT_WINDOW_SECONDS_AFTER = 1.5
 
 
 def _normalize_text_for_sync(text: str) -> str:
@@ -1576,6 +1578,72 @@ def _build_transcription_token_windows(
 
     windows.sort(key=lambda w: (w["start_time"], w["end_time"], w["token"]))
     return windows
+
+
+def _build_transcription_word_windows(
+    transcriptions: list[dict],
+    transcription_words: list[dict] | None = None,
+) -> list[dict]:
+    """Build word windows preserving token order for containment checks."""
+    windows: list[dict] = []
+
+    if transcription_words:
+        for word in transcription_words:
+            raw_word = read_string(word.get("word")) or ""
+            tokens = _tokenize_text_for_sync(raw_word)
+            if not tokens:
+                continue
+
+            start = _to_float(word.get("start_time"), 0.0)
+            end = _to_float(word.get("end_time"), start)
+            if end <= start:
+                end = start + 0.001
+
+            token_duration = (end - start) / max(len(tokens), 1)
+            for i, token in enumerate(tokens):
+                token_start = start + (i * token_duration)
+                token_end = start + ((i + 1) * token_duration)
+                windows.append({
+                    "token": token,
+                    "raw": token,
+                    "start_time": token_start,
+                    "end_time": token_end,
+                })
+    else:
+        for segment in transcriptions:
+            text = read_string(segment.get("text")) or ""
+            tokens = _tokenize_text_for_sync(text)
+            if not tokens:
+                continue
+
+            start = _to_float(segment.get("start_time"), 0.0)
+            end = _to_float(segment.get("end_time"), start)
+            if end <= start:
+                end = start + 0.001
+
+            token_duration = (end - start) / max(len(tokens), 1)
+            for i, token in enumerate(tokens):
+                token_start = start + (i * token_duration)
+                token_end = start + ((i + 1) * token_duration)
+                windows.append({
+                    "token": token,
+                    "raw": token,
+                    "start_time": token_start,
+                    "end_time": token_end,
+                })
+
+    windows.sort(key=lambda w: (w["start_time"], w["end_time"], w["token"]))
+    return windows
+
+
+def _collect_word_windows_for_range(start: float, end: float, word_windows: list[dict]) -> list[dict]:
+    if end <= start:
+        return []
+    return [
+        window
+        for window in word_windows
+        if window["end_time"] > start and window["start_time"] < end
+    ]
 
 
 def _collect_aligned_tokens_for_window(start: float, end: float, token_windows: list[dict]) -> list[str]:
@@ -1703,6 +1771,124 @@ def _find_best_temporal_offset(subtitle: dict, token_windows: list[dict], window
         "best_offset_seconds": round(best_offset, 3),
         "best_tokens": best_tokens,
         "best_text": " ".join(best_tokens),
+    }
+
+
+def build_sync_report_window_containment(
+    subtitles: list[dict],
+    transcriptions: list[dict],
+    transcription_words: list[dict] | None = None,
+    window_before_seconds: float = CONTAINMENT_WINDOW_SECONDS_BEFORE,
+    window_after_seconds: float = CONTAINMENT_WINDOW_SECONDS_AFTER,
+    words_source: str = "raw_words",
+) -> dict:
+    duplicates = _detect_subtitle_overlaps(subtitles)
+    duplicate_map: dict[int, list[int]] = {}
+    for duplicate in duplicates:
+        first, second = duplicate["subtitle_indices"]
+        duplicate_map.setdefault(first, []).append(second)
+        duplicate_map.setdefault(second, []).append(first)
+
+    word_windows = _build_transcription_word_windows(transcriptions, transcription_words)
+
+    details: list[dict] = []
+    synced = 0
+    likely_synced = 0
+    misaligned = 0
+    ratio_sum = 0.0
+
+    safe_before = max(0.0, float(window_before_seconds))
+    safe_after = max(0.0, float(window_after_seconds))
+
+    for index, subtitle in enumerate(subtitles):
+        subtitle_text = subtitle.get("text", "") or ""
+        subtitle_start = _to_float(subtitle.get("start_time"), 0.0)
+        subtitle_end = _to_float(subtitle.get("end_time"), subtitle_start)
+        subtitle_normalized = _normalize_text_for_sync(subtitle_text)
+        subtitle_tokens = _tokenize_text_for_sync(subtitle_text)
+
+        window_start = max(0.0, subtitle_start - safe_before)
+        window_end = subtitle_end + safe_after
+        window_rows = _collect_word_windows_for_range(window_start, window_end, word_windows)
+
+        window_tokens = [str(row.get("token") or "") for row in window_rows if str(row.get("token") or "")]
+        window_raw_tokens = [str(row.get("raw") or "") for row in window_rows if str(row.get("raw") or "")]
+        transcription_window_text = " ".join(window_raw_tokens).strip()
+        transcription_window_text_normalized = _normalize_text_for_sync(transcription_window_text)
+
+        is_contained = bool(subtitle_normalized) and subtitle_normalized in transcription_window_text_normalized
+        status = "SYNCED" if is_contained else "MISALIGNED"
+        if status == "SYNCED":
+            synced += 1
+        else:
+            misaligned += 1
+
+        ratio = _compute_word_overlap_ratio(subtitle_tokens, window_tokens)
+        ratio_sum += ratio
+        issues: list[str] = [
+            f"WINDOW_SECONDS_BEFORE:{safe_before:.1f}",
+            f"WINDOW_SECONDS_AFTER:{safe_after:.1f}",
+            f"CONTAINMENT_CHECK:{str(is_contained).lower()}",
+        ]
+
+        if words_source != "raw_words":
+            issues.append("WORDS_SOURCE:segments_fallback")
+        else:
+            issues.append("WORDS_SOURCE:raw_words")
+
+        if not subtitle_text.strip():
+            issues.append("EMPTY_SUBTITLE_TEXT")
+        if not window_rows:
+            issues.append("NO_OVERLAPPING_TRANSCRIPTION_WINDOW")
+        if not is_contained:
+            issues.append("SUBTITLE_NOT_CONTAINED_IN_WINDOW")
+
+        duplicate_peers = duplicate_map.get(index, [])
+        for peer in duplicate_peers:
+            issues.append(f"DUPLICATE_OVERLAP: overlaps subtitle #{peer}")
+
+        detail = {
+            "subtitle_index": index,
+            "subtitle_time_seconds": [round(subtitle_start, 3), round(subtitle_end, 3)],
+            "subtitle_text": subtitle_text,
+            "matched_transcription_text": transcription_window_text,
+            "word_overlap_ratio": round(ratio, 4),
+            "edit_distance": _levenshtein_distance(subtitle_normalized, transcription_window_text_normalized),
+            "status": status,
+            "issues": issues,
+            "subtitle_segment_start_seconds": round(subtitle_start, 3),
+            "subtitle_segment_end_seconds": round(subtitle_end, 3),
+            "transcription_window_start_seconds": round(window_start, 3),
+            "transcription_window_end_seconds": round(window_end, 3),
+            "transcription_window_text": transcription_window_text,
+            "subtitle_text_normalized": subtitle_normalized,
+            "transcription_window_text_normalized": transcription_window_text_normalized,
+            "subtitle_contained_in_window": is_contained,
+        }
+        details.append(detail)
+
+    total = len(subtitles)
+    avg_ratio = (ratio_sum / total) if total else 0.0
+    synced_share = (synced / total) if total else 1.0
+    if synced_share > 0.9:
+        overall = "GOOD"
+    elif synced_share >= 0.7:
+        overall = "WARNING"
+    else:
+        overall = "BAD"
+
+    return {
+        "summary": {
+            "total_subtitles": total,
+            "synced": synced,
+            "likely_synced": likely_synced,
+            "misaligned": misaligned,
+            "duplicates_found": len(duplicates),
+            "avg_word_overlap_ratio": round(avg_ratio, 4),
+            "overall_sync_status": overall,
+        },
+        "details": details,
+        "duplicates": duplicates,
     }
 
 
@@ -2396,6 +2582,7 @@ def analyze_video(request):
             filtered_subtitle_ids = {d.get("detection_id") for d in filtered_subtitles if d.get("detection_id")}
             transcriptions_for_sync: list[dict] = []
             transcription_words_for_sync: list[dict] = []
+            words_source = "segments_fallback"
             if project_id:
                 try:
                     transcriptions_resp = (
@@ -2429,6 +2616,8 @@ def analyze_video(request):
                             storage_path = read_string(first_row.get("transcription_raw_storage_path"))
                     if storage_path:
                         transcription_words_for_sync = load_transcription_raw_words(project_id, storage_path)
+                        if transcription_words_for_sync:
+                            words_source = "raw_words"
                 except Exception as transcription_raw_error:
                     print(
                         (
@@ -2437,11 +2626,13 @@ def analyze_video(request):
                         ),
                         flush=True,
                     )
-            sync_report = build_sync_report(
+            sync_report = build_sync_report_window_containment(
                 subtitles=filtered_subtitles,
                 transcriptions=transcriptions_for_sync,
                 transcription_words=transcription_words_for_sync if transcription_words_for_sync else None,
-                offset_window_seconds=OFFSET_SCAN_WINDOW_SECONDS,
+                window_before_seconds=CONTAINMENT_WINDOW_SECONDS_BEFORE,
+                window_after_seconds=CONTAINMENT_WINDOW_SECONDS_AFTER,
+                words_source=words_source,
             )
 
             spelling_input = [
