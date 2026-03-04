@@ -3,6 +3,7 @@ import re
 import stat
 import tarfile
 import time
+from datetime import datetime, timezone
 import concurrent.futures
 import traceback
 import uuid
@@ -61,6 +62,7 @@ MIN_SUBTITLE_CONFIDENCE = float(os.environ.get("MIN_SUBTITLE_CONFIDENCE", "0.9")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
 VI_OPERATION_TIMEOUT_SECONDS = int(os.environ.get("VI_OPERATION_TIMEOUT_SECONDS", "480"))
 VI_POLL_INTERVAL_SECONDS = int(os.environ.get("VI_POLL_INTERVAL_SECONDS", "15"))
+DEBUG_LOG_MAX_LINES = int(os.environ.get("DEBUG_LOG_MAX_LINES", "50"))
 FRAME_IO_TOKEN = os.environ.get("FRAME_IO_TOKEN") or os.environ.get("FRAME_IO_V4_TOKEN")
 FRAME_IO_V4_API = "https://api.frame.io/v4"
 FRAME_MEDIA_LINK_INCLUDES = ",".join((
@@ -436,24 +438,61 @@ def read_number(value) -> float | None:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-def update_status(supabase, project_id: str, status: str, progress: int, debug_msg: str = ""):
-    """Update project status and optionally store a debug message in error_message.
+def _utc_timestamp_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-    The debug_msg is stored in `error_message` so the frontend can show real-time
-    step-by-step progress via Supabase Realtime.  It is cleared when status=completed.
-    """
-    update_data: dict = {
+
+def append_debug_log_line(
+    supabase,
+    project_id: str,
+    debug_lines: list[str] | None,
+    level: str,
+    status: str,
+    progress: int,
+    message: str,
+):
+    line = f"[{_utc_timestamp_iso()}] [{level}] [{status} {progress}%] {message}"
+    print(line, flush=True)
+
+    if debug_lines is None:
+        return
+
+    debug_lines.append(line)
+    if len(debug_lines) > DEBUG_LOG_MAX_LINES:
+        del debug_lines[:-DEBUG_LOG_MAX_LINES]
+
+    supabase.table("projects").update({
+        "error_message": "\n".join(debug_lines),
+    }).eq("id", project_id).execute()
+
+
+def update_status(
+    supabase,
+    project_id: str,
+    status: str,
+    progress: int,
+    debug_msg: str = "",
+    debug_lines: list[str] | None = None,
+    debug_level: str = "DEBUG",
+):
+    """Update project status/progress and append debug log line if provided."""
+    supabase.table("projects").update({
         "status": status,
         "progress": progress,
-    }
-    if debug_msg:
-        update_data["error_message"] = f"[DEBUG] {debug_msg}"
-    if status == "completed":
-        update_data["error_message"] = None
+    }).eq("id", project_id).execute()
 
-    supabase.table("projects").update(update_data).eq("id", project_id).execute()
-    log_line = f"[{status} {progress}%] {debug_msg}" if debug_msg else f"[{status} {progress}%]"
-    print(f"  >> {log_line}", flush=True)
+    if debug_msg:
+        append_debug_log_line(
+            supabase=supabase,
+            project_id=project_id,
+            debug_lines=debug_lines,
+            level=debug_level,
+            status=status,
+            progress=progress,
+            message=debug_msg,
+        )
+    else:
+        print(f"[{_utc_timestamp_iso()}] [DEBUG] [{status} {progress}%]", flush=True)
 
 
 def clear_previous_results(supabase, project_id: str):
@@ -507,7 +546,7 @@ def detect_text_in_video(video_path: str) -> list[dict]:
     return extract_detections_from_vi_result(result)
 
 
-def detect_text_in_video_with_raw(video_path: str) -> tuple[list[dict], dict]:
+def detect_text_in_video_with_raw(video_path: str, debug_logger=None) -> tuple[list[dict], dict]:
     """Detect text and return both flattened detections and raw VI payload."""
     client = vi.VideoIntelligenceServiceClient()
     video_size_bytes = os.path.getsize(video_path)
@@ -517,31 +556,39 @@ def detect_text_in_video_with_raw(video_path: str) -> tuple[list[dict], dict]:
         input_content = f.read()
 
     features = [vi.Feature.TEXT_DETECTION]
-    print(
-        "Video Intelligence start: "
-        f"payload_size={video_size_mb:.1f}MB timeout={VI_OPERATION_TIMEOUT_SECONDS}s poll={VI_POLL_INTERVAL_SECONDS}s",
-        flush=True,
+    def _log(message: str, level: str = "DEBUG"):
+        if debug_logger:
+            debug_logger(message, level=level)
+            return
+        print(message, flush=True)
+
+    _log(
+        "VI request OUT annotate_video "
+        f"payload_size={video_size_mb:.1f}MB "
+        f"timeout={VI_OPERATION_TIMEOUT_SECONDS}s poll={VI_POLL_INTERVAL_SECONDS}s",
+        level="DEBUG",
     )
     operation = client.annotate_video(
         request={"input_content": input_content, "features": features}
     )
     operation_name = getattr(getattr(operation, "operation", None), "name", "") or "unknown"
-    print(f"Video Intelligence operation created: name={operation_name}", flush=True)
+    _log(f"VI response IN operation_created name={operation_name}", level="DEBUG")
 
     started_at = time.time()
     while True:
         try:
             result = operation.result(timeout=VI_POLL_INTERVAL_SECONDS)
             elapsed = time.time() - started_at
-            print(
-                "Video Intelligence operation completed: "
+            _log(
+                "VI response IN_DONE "
                 f"name={operation_name} elapsed={elapsed:.1f}s",
-                flush=True,
+                level="DEBUG",
             )
             break
         except concurrent.futures.TimeoutError:
             elapsed = time.time() - started_at
             progress_hint = ""
+            progress_value = None
             try:
                 metadata = operation.metadata
                 if metadata and getattr(metadata, "annotation_progress", None):
@@ -551,16 +598,24 @@ def detect_text_in_video_with_raw(video_path: str) -> tuple[list[dict], dict]:
                         if hasattr(progress, "progress_percent")
                     ]
                     if percents:
-                        progress_hint = f" vi_progress={max(percents)}%"
+                        progress_value = max(percents)
+                        progress_hint = f" vi_progress={progress_value}%"
             except Exception:
                 progress_hint = ""
 
-            print(
-                "Video Intelligence still running: "
+            _log(
+                "VI poll IN_PROGRESS "
                 f"name={operation_name} elapsed={elapsed:.1f}s{progress_hint}",
-                flush=True,
+                level="DEBUG",
             )
             if elapsed >= VI_OPERATION_TIMEOUT_SECONDS:
+                _log(
+                    "VI timeout ERROR "
+                    f"name={operation_name} elapsed={elapsed:.1f}s payload={video_size_mb:.1f}MB "
+                    f"configured_timeout={VI_OPERATION_TIMEOUT_SECONDS}s "
+                    f"last_progress={progress_value if progress_value is not None else 'unknown'}",
+                    level="ERROR",
+                )
                 raise TimeoutError(
                     "Video Intelligence did not complete within "
                     f"{VI_OPERATION_TIMEOUT_SECONDS}s "
@@ -1040,7 +1095,7 @@ def _extract_words_from_v2_results(results) -> list[dict]:
     return words
 
 
-def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0) -> tuple[list[dict], dict]:
+def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0, debug_logger=None) -> tuple[list[dict], dict]:
     """Transcribe audio using Google Cloud Speech-to-Text V2 (chirp_3).
 
     Uses synchronous `recognize` for audio ≤60s and
@@ -1062,7 +1117,17 @@ def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0)
     )
 
     recognizer = f"projects/{project_id}/locations/{region}/recognizers/_"
-    print(f"Speech-to-Text V2: using chirp_3 for {duration_seconds:.1f}s audio", flush=True)
+    def _log(message: str, level: str = "DEBUG"):
+        if debug_logger:
+            debug_logger(message, level=level)
+            return
+        print(message, flush=True)
+
+    _log(
+        "STT start OUT "
+        f"model=chirp_3 duration={duration_seconds:.1f}s region={region}",
+        level="DEBUG",
+    )
 
     config = cloud_speech.RecognitionConfig(
         auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
@@ -1085,7 +1150,7 @@ def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0)
         blob_name = f"speech-tmp/{uuid.uuid4()}.wav"
         gcs_uri = f"gs://{bucket_name}/{blob_name}"
 
-        print(f"Speech-to-Text V2: uploading audio to {gcs_uri}...", flush=True)
+        _log(f"STT request OUT upload_to_gcs uri={gcs_uri}", level="DEBUG")
         storage_client = gcs.Client()
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
@@ -1101,9 +1166,10 @@ def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0)
                     inline_response_config=cloud_speech.InlineOutputConfig(),
                 ),
             )
-            print("Speech-to-Text V2: using batch_recognize...", flush=True)
+            _log("STT request OUT batch_recognize mode=batch", level="DEBUG")
             operation = client.batch_recognize(request=request)
             response = operation.result(timeout=600)
+            _log("STT response IN batch_recognize completed", level="DEBUG")
             raw_payload = MessageToDict(
                 response._pb,
                 preserving_proto_field_name=True,
@@ -1115,7 +1181,7 @@ def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0)
         finally:
             try:
                 blob.delete()
-                print(f"Speech-to-Text V2: cleaned up {gcs_uri}", flush=True)
+                _log(f"STT cleanup IN deleted_gcs_temp uri={gcs_uri}", level="DEBUG")
             except Exception:
                 pass
     else:
@@ -1127,19 +1193,20 @@ def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0)
             config=config,
             content=audio_content,
         )
-        print("Speech-to-Text V2: using synchronous recognize...", flush=True)
+        _log("STT request OUT recognize mode=sync", level="DEBUG")
         response = client.recognize(request=request)
+        _log("STT response IN recognize completed", level="DEBUG")
         raw_payload = MessageToDict(
             response._pb,
             preserving_proto_field_name=True,
         ) if hasattr(response, "_pb") else {}
         words = _extract_words_from_v2_results(response.results)
 
-    print(f"Speech-to-Text V2: got {len(words)} words", flush=True)
+    _log(f"STT response IN words={len(words)}", level="DEBUG")
 
     # Group words into segments
     segments = _group_words_into_segments(words)
-    print(f"Speech-to-Text V2: grouped into {len(segments)} segments", flush=True)
+    _log(f"STT response IN grouped_segments={len(segments)}", level="DEBUG")
     return segments, raw_payload
 
 
@@ -2089,6 +2156,24 @@ def analyze_video(request):
         return {"error": "Missing or invalid raw_ocr_payload", "error_code": "invalid_payload"}, 400
 
     supabase = get_supabase()
+    debug_lines: list[str] = []
+
+    def make_step_logger(status: str, progress: int):
+        def _logger(message: str, level: str = "DEBUG"):
+            if not project_id:
+                print(message, flush=True)
+                return
+            append_debug_log_line(
+                supabase=supabase,
+                project_id=project_id,
+                debug_lines=debug_lines,
+                level=level,
+                status=status,
+                progress=progress,
+                message=message,
+            )
+
+        return _logger
 
     try:
         if mode == "classify_ocr_payload":
@@ -2205,21 +2290,24 @@ def analyze_video(request):
             # ── Step 1: Download video ──────────────────────────────
             t1 = time.time()
             update_status(supabase, project_id, "fetching_video", 10,
-                          "Downloading video...")
+                          "Downloading video...", debug_lines=debug_lines)
             video_path = download_video(video_url, tmp_dir)
             file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
             elapsed = time.time() - t1
             update_status(supabase, project_id, "fetching_video", 15,
-                          f"Video downloaded: {file_size_mb:.1f} MB in {elapsed:.1f}s")
+                          f"Video downloaded: {file_size_mb:.1f} MB in {elapsed:.1f}s", debug_lines=debug_lines)
 
             # ── Step 2: Detect text in video (Video Intelligence) ───
             t2 = time.time()
             update_status(supabase, project_id, "detecting_text", 20,
-                          "Sending video to Google Video Intelligence API...")
-            raw_detections, raw_payload = detect_text_in_video_with_raw(video_path)
+                          "Sending video to Google Video Intelligence API...", debug_lines=debug_lines)
+            raw_detections, raw_payload = detect_text_in_video_with_raw(
+                video_path,
+                debug_logger=make_step_logger("detecting_text", 20),
+            )
             elapsed = time.time() - t2
             update_status(supabase, project_id, "detecting_text", 30,
-                          f"Video Intelligence done: {len(raw_detections)} raw text detections in {elapsed:.1f}s")
+                          f"Video Intelligence done: {len(raw_detections)} raw text detections in {elapsed:.1f}s", debug_lines=debug_lines)
 
             raw_meta = save_ocr_raw_to_storage(project_id, video_url, raw_payload)
             update_project_ocr_raw_metadata(supabase, project_id, raw_meta)
@@ -2242,19 +2330,23 @@ def analyze_video(request):
             n_fixed = sum(1 for d in classified if d.get("is_fixed_text"))
             store_text_detections(supabase, project_id, classified)
             update_status(supabase, project_id, "detecting_text", 40,
-                          f"Text classified: {n_subtitles} subtitles, {n_fixed} fixed texts")
+                          f"Text classified: {n_subtitles} subtitles, {n_fixed} fixed texts", debug_lines=debug_lines)
 
             # ── Step 3: Transcribe audio (Gemini) ───────────────────
             t3 = time.time()
             update_status(supabase, project_id, "transcribing_audio", 50,
-                          "Extracting audio track with ffmpeg...")
+                          "Extracting audio track with ffmpeg...", debug_lines=debug_lines)
             audio_path = extract_audio(video_path, tmp_dir)
             audio_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
             print(f"  Audio extracted: {audio_size_mb:.1f} MB", flush=True)
 
             update_status(supabase, project_id, "transcribing_audio", 55,
-                          "Sending audio to Speech-to-Text for transcription...")
-            raw_transcription_segments, raw_transcription_payload = transcribe_with_speech_to_text(audio_path, video_duration)
+                          "Sending audio to Speech-to-Text for transcription...", debug_lines=debug_lines)
+            raw_transcription_segments, raw_transcription_payload = transcribe_with_speech_to_text(
+                audio_path,
+                video_duration,
+                debug_logger=make_step_logger("transcribing_audio", 55),
+            )
             transcription_segments = split_transcription_segments(raw_transcription_segments)
             elapsed = time.time() - t3
             store_transcriptions(supabase, project_id, transcription_segments)
@@ -2266,16 +2358,25 @@ def analyze_video(request):
                 )
                 update_project_transcription_raw_metadata(supabase, project_id, transcription_raw_meta)
             except Exception as transcription_raw_error:
-                print(
-                    f"WARNING: could not persist transcription raw payload (project_id={project_id}): {transcription_raw_error}",
-                    flush=True,
+                append_debug_log_line(
+                    supabase=supabase,
+                    project_id=project_id,
+                    debug_lines=debug_lines,
+                    level="ERROR",
+                    status="transcribing_audio",
+                    progress=65,
+                    message=(
+                        "Could not persist transcription raw payload "
+                        f"(project_id={project_id}): {transcription_raw_error}"
+                    ),
                 )
             update_status(supabase, project_id, "transcribing_audio", 65,
                           (
                               "Transcription done: "
                               f"{len(raw_transcription_segments)} raw segments -> "
                               f"{len(transcription_segments)} normalized segments in {elapsed:.1f}s"
-                          ))
+                          ),
+                          debug_lines=debug_lines)
 
             # ── Step 4: Check spelling (API Ninjas) ─────────────────
             t4 = time.time()
@@ -2284,28 +2385,35 @@ def analyze_video(request):
                 for d in build_filtered_subtitles(classified)
             ]
             update_status(supabase, project_id, "checking_spelling", 70,
-                          f"Checking spelling on {len(subtitle_texts)} subtitle segments...")
+                          f"Checking spelling on {len(subtitle_texts)} subtitle segments...", debug_lines=debug_lines)
             spelling_errors = check_spelling(subtitle_texts)
             filtered_errors = filter_false_positives(spelling_errors, classified)
             store_spelling_errors(supabase, project_id, filtered_errors)
             elapsed = time.time() - t4
             update_status(supabase, project_id, "checking_spelling", 80,
-                          f"Spelling done: {len(spelling_errors)} raw, {len(filtered_errors)} after filtering in {elapsed:.1f}s")
+                          f"Spelling done: {len(spelling_errors)} raw, {len(filtered_errors)} after filtering in {elapsed:.1f}s", debug_lines=debug_lines)
 
             # ── Step 5: Detect mismatches ───────────────────────────
             t5 = time.time()
             update_status(supabase, project_id, "detecting_mismatches", 85,
-                          "Comparing subtitles against transcription...")
+                          "Comparing subtitles against transcription...", debug_lines=debug_lines)
             filtered_subs = build_filtered_subtitles(classified)
             mismatches = detect_mismatches(filtered_subs, transcription_segments)
             store_mismatches(supabase, project_id, mismatches)
             elapsed = time.time() - t5
             update_status(supabase, project_id, "detecting_mismatches", 95,
-                          f"Mismatches done: {len(mismatches)} found in {elapsed:.1f}s")
+                          f"Mismatches done: {len(mismatches)} found in {elapsed:.1f}s", debug_lines=debug_lines)
 
             # ── Done ────────────────────────────────────────────────
             total_elapsed = time.time() - t0
-            update_status(supabase, project_id, "completed", 100)
+            update_status(
+                supabase,
+                project_id,
+                "completed",
+                100,
+                f"Analysis completed in {total_elapsed:.1f}s",
+                debug_lines=debug_lines,
+            )
             print(f"analyze_video COMPLETED in {total_elapsed:.1f}s", flush=True)
             print("=" * 60, flush=True)
 
@@ -2316,10 +2424,16 @@ def analyze_video(request):
         print(f"ERROR in analyze_video after {total_elapsed:.1f}s: {e}", flush=True)
         traceback.print_exc()
         try:
-            update_status(supabase, project_id, "error", 0)
-            supabase.table("projects").update({
-                "error_message": str(e)[:500],
-            }).eq("id", project_id).execute()
+            if project_id:
+                update_status(
+                    supabase,
+                    project_id,
+                    "error",
+                    0,
+                    f"Pipeline failed after {total_elapsed:.1f}s: {e}",
+                    debug_lines=debug_lines,
+                    debug_level="ERROR",
+                )
         except Exception as db_err:
             print(f"Failed to update error status in DB: {db_err}", flush=True)
         return {"error": str(e)}, 500

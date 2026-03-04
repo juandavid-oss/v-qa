@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ProjectStatus } from "@/types/database";
 import { statusLabel } from "@/lib/utils";
 
@@ -18,8 +18,29 @@ const STEPS: { status: ProjectStatus; label: string; icon: string }[] = [
   { status: "detecting_mismatches", label: "Detecting Mismatches", icon: "compare" },
 ];
 
+function formatElapsed(totalSeconds: number): string {
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
 export default function ProcessingOverlay({ status, progress, debugMessage }: ProcessingOverlayProps) {
   const [showDebug, setShowDebug] = useState(true);
+  const [startedAt] = useState(() => Date.now());
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [startedAt]);
 
   if (status === "completed" || status === "error") return null;
 
@@ -40,6 +61,9 @@ export default function ProcessingOverlay({ status, progress, debugMessage }: Pr
           </h2>
           <p className="text-slate-400 text-sm text-center">
             {statusLabel(status)}...
+          </p>
+          <p className="text-xs font-mono text-primary mt-2">
+            Elapsed: {formatElapsed(elapsedSeconds)}
           </p>
         </div>
 
@@ -100,7 +124,7 @@ export default function ProcessingOverlay({ status, progress, debugMessage }: Pr
           </button>
           {showDebug && cleanDebug && (
             <div className="mt-2 bg-slate-900/80 border border-slate-800 rounded-lg px-3 py-2">
-              <p className="text-xs font-mono text-amber-400/90 break-words">
+              <p className="text-xs font-mono text-amber-400/90 whitespace-pre-wrap break-words">
                 {cleanDebug}
               </p>
             </div>
