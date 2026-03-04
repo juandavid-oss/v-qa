@@ -16,7 +16,6 @@ import functions_framework
 import requests
 from google.cloud import videointelligence_v1 as vi
 from google.protobuf.json_format import MessageToDict
-import google.generativeai as genai
 from supabase import create_client
 
 
@@ -54,15 +53,11 @@ def _ensure_ffmpeg():
 # --- Configuration ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL") or "gemini-flash-latest"
-GEMINI_FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-1.5-flash")
 SPELLCHECK_API_URL = os.environ.get("SPELLCHECK_API_URL", "https://api.api-ninjas.com/v1/spellcheck")
 SPELLCHECK_API_KEY = os.environ.get("SPELLCHECK_API_KEY")
 CLOUD_FUNCTION_SECRET = os.environ.get("CLOUD_FUNCTION_SECRET")
 MIN_SUBTITLE_CONFIDENCE = float(os.environ.get("MIN_SUBTITLE_CONFIDENCE", "0.9"))
-TRANSCRIPTION_MAX_CHUNK_SECONDS = float(os.environ.get("TRANSCRIPTION_MAX_CHUNK_SECONDS", "2.0"))
-TRANSCRIPTION_MIN_CHUNK_SECONDS = float(os.environ.get("TRANSCRIPTION_MIN_CHUNK_SECONDS", "1.0"))
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
 FRAME_IO_TOKEN = os.environ.get("FRAME_IO_TOKEN") or os.environ.get("FRAME_IO_V4_TOKEN")
 FRAME_IO_V4_API = "https://api.frame.io/v4"
 FRAME_MEDIA_LINK_INCLUDES = ",".join((
@@ -902,7 +897,7 @@ def classify_subtitle_vs_fixed(
     return detections
 
 
-# --- 5. Audio Transcription (Gemini) ---
+# --- 5. Audio Transcription (Google Cloud Speech-to-Text) ---
 def extract_audio(video_path: str, tmp_dir: str) -> str:
     _ensure_ffmpeg()
     audio_path = os.path.join(tmp_dir, "audio.wav")
@@ -917,79 +912,159 @@ def extract_audio(video_path: str, tmp_dir: str) -> str:
     return audio_path
 
 
-def transcribe_with_gemini(audio_path: str) -> list[dict]:
-    """Transcribe audio using Gemini."""
-    if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY is not configured")
+def _group_words_into_segments(words: list[dict]) -> list[dict]:
+    """Group word-level results into sentence/phrase segments.
 
-    genai.configure(api_key=GEMINI_API_KEY)
-    audio_file = genai.upload_file(audio_path, mime_type="audio/wav")
+    Split on: speaker change, pause > 1.5s, sentence-ending punctuation, or max 8s duration.
+    """
+    if not words:
+        return []
 
-    prompt = """Transcribe this audio precisely. Return the transcription as a JSON array where each element has:
-- "text": the transcribed text for that segment
-- "start_time": start time in seconds
-- "end_time": end time in seconds
-- "speaker": speaker label (e.g., "Speaker 1")
+    segments: list[dict] = []
+    current_words: list[dict] = []
+    current_speaker: str | None = None
 
-Return ONLY valid JSON, no markdown or other text."""
+    def _flush():
+        if not current_words:
+            return
+        text = " ".join(w["word"] for w in current_words)
+        confidences = [w["confidence"] for w in current_words if w.get("confidence") is not None]
+        segments.append({
+            "text": text,
+            "start_time": current_words[0]["start_time"],
+            "end_time": current_words[-1]["end_time"],
+            "speaker": current_speaker,
+            "confidence": sum(confidences) / len(confidences) if confidences else None,
+        })
 
-    candidate_models: list[str] = []
-    configured_model = read_string(GEMINI_MODEL)
-    if configured_model:
-        candidate_models.append(configured_model)
-    for fallback_model in GEMINI_FALLBACK_MODELS:
-        if fallback_model not in candidate_models:
-            candidate_models.append(fallback_model)
+    for w in words:
+        speaker = w.get("speaker")
+        start = w["start_time"]
 
-    last_error = None
-    try:
-        for model_name in candidate_models:
-            try:
-                print(f"Transcribing with Gemini model: {model_name}", flush=True)
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(
-                    [prompt, audio_file],
-                    request_options={"timeout": 600},
-                )
-                text = (response.text or "").strip()
-                if not text:
-                    raise RuntimeError("Gemini returned an empty transcription response")
+        # Speaker change → flush
+        if current_words and speaker != current_speaker:
+            _flush()
+            current_words = []
 
-                # Clean potential markdown wrapping
-                if text.startswith("```"):
-                    text = text.split("\n", 1)[1]
-                    text = text.rsplit("```", 1)[0]
+        # Pause > 1.5s → flush
+        if current_words and (start - current_words[-1]["end_time"]) > 1.5:
+            _flush()
+            current_words = []
 
-                import json
-                segments = json.loads(text)
-                if not isinstance(segments, list):
-                    raise RuntimeError("Gemini transcription response was not a JSON array")
-                return segments
-            except Exception as error:
-                last_error = error
-                message = str(error)
-                print(f"Gemini model {model_name} failed: {message}", flush=True)
-                if not is_gemini_model_unavailable_error(message):
-                    raise
-    finally:
-        try:
-            if getattr(audio_file, "name", None):
-                genai.delete_file(audio_file.name)
-        except Exception:
-            pass
+        # Max segment duration ~8s → flush
+        if current_words and (start - current_words[0]["start_time"]) > 8.0:
+            _flush()
+            current_words = []
 
-    raise RuntimeError(
-        "No available Gemini model for transcription. "
-        f"Tried: {', '.join(candidate_models)}. Last error: {last_error}"
+        current_speaker = speaker
+        current_words.append(w)
+
+        # Sentence-ending punctuation → flush
+        word_text = w.get("word", "")
+        if word_text and word_text[-1] in ".?!":
+            _flush()
+            current_words = []
+
+    _flush()
+    return segments
+
+
+def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0) -> list[dict]:
+    """Transcribe audio using Google Cloud Speech-to-Text V1.
+
+    Uses synchronous `recognize` for short audio (≤60s) and
+    `long_running_recognize` with GCS upload for longer audio.
+    """
+    from google.cloud import speech_v1 as speech
+    from google.cloud import storage as gcs
+
+    client = speech.SpeechClient()
+
+    # Choose model based on video duration
+    model = "short" if duration_seconds <= 60 else "long"
+    print(f"Speech-to-Text: using model '{model}' for {duration_seconds:.1f}s audio", flush=True)
+
+    diarization_config = speech.SpeakerDiarizationConfig(
+        enable_speaker_diarization=True,
+        min_speaker_count=1,
+        max_speaker_count=6,
     )
+
+    config = speech.RecognitionConfig(
+        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+        sample_rate_hertz=16000,
+        language_code="en-US",
+        model=model,
+        enable_automatic_punctuation=True,
+        enable_word_time_offsets=True,
+        diarization_config=diarization_config,
+    )
+
+    gcs_uri = None
+    try:
+        if duration_seconds > 60:
+            # long_running_recognize requires audio via GCS URI
+            project_id = GCP_PROJECT_ID
+            bucket_name = f"{project_id}-vqa-tmp" if project_id else "vqa-speech-tmp"
+            blob_name = f"speech-tmp/{uuid.uuid4()}.wav"
+            gcs_uri = f"gs://{bucket_name}/{blob_name}"
+
+            print(f"Speech-to-Text: uploading audio to {gcs_uri}...", flush=True)
+            storage_client = gcs.Client()
+            bucket = storage_client.bucket(bucket_name)
+            blob = bucket.blob(blob_name)
+            blob.upload_from_filename(audio_path)
+
+            audio = speech.RecognitionAudio(uri=gcs_uri)
+            print("Speech-to-Text: using long_running_recognize...", flush=True)
+            operation = client.long_running_recognize(config=config, audio=audio)
+            response = operation.result(timeout=600)
+        else:
+            with open(audio_path, "rb") as f:
+                audio_content = f.read()
+            audio = speech.RecognitionAudio(content=audio_content)
+            print("Speech-to-Text: using synchronous recognize...", flush=True)
+            response = client.recognize(config=config, audio=audio)
+    finally:
+        # Clean up temporary GCS file
+        if gcs_uri:
+            try:
+                blob.delete()
+                print(f"Speech-to-Text: cleaned up {gcs_uri}", flush=True)
+            except Exception:
+                pass
+
+    # Extract word-level results with timestamps and speaker tags
+    words: list[dict] = []
+    for result in response.results:
+        alt = result.alternatives[0] if result.alternatives else None
+        if not alt:
+            continue
+        for word_info in alt.words:
+            start_s = word_info.start_time.total_seconds()
+            end_s = word_info.end_time.total_seconds()
+            words.append({
+                "word": word_info.word,
+                "start_time": start_s,
+                "end_time": end_s,
+                "confidence": alt.confidence,
+                "speaker": f"Speaker {word_info.speaker_tag}" if word_info.speaker_tag else None,
+            })
+
+    print(f"Speech-to-Text: got {len(words)} words from {len(response.results)} results", flush=True)
+
+    # Group words into segments
+    segments = _group_words_into_segments(words)
+    print(f"Speech-to-Text: grouped into {len(segments)} segments", flush=True)
+    return segments
 
 
 def split_transcription_segments(segments: list[dict]) -> list[dict]:
-    """Normalize transcription segments preserving original Gemini timestamps.
+    """Normalize transcription segments preserving original timestamps.
 
     Important: this function does NOT synthesize/chunk timestamps. It only parses
-    and sanitizes the start/end times returned by Gemini, so UI cards align with
-    real transcription timing.
+    and sanitizes the start/end times returned by the transcription service, so
+    UI cards align with real transcription timing.
     """
     if not segments:
         return []
@@ -1036,18 +1111,6 @@ def split_transcription_segments(segments: list[dict]) -> list[dict]:
     normalized_segments.sort(key=lambda s: (s.get("start_time", 0.0), s.get("end_time", 0.0)))
     return normalized_segments
 
-
-def is_gemini_model_unavailable_error(message: str) -> bool:
-    lowered = message.lower()
-    if "no longer available to new users" in lowered:
-        return True
-    if "model not found" in lowered:
-        return True
-    if "not found for api version" in lowered and "models/" in lowered:
-        return True
-    if "404" in lowered and "models/" in lowered:
-        return True
-    return False
 
 
 # --- 6. Spelling & Grammar Check (API Ninjas Spellcheck) ---
@@ -2051,8 +2114,8 @@ def analyze_video(request):
             print(f"  Audio extracted: {audio_size_mb:.1f} MB", flush=True)
 
             update_status(supabase, project_id, "transcribing_audio", 55,
-                          "Sending audio to Gemini for transcription...")
-            raw_transcription_segments = transcribe_with_gemini(audio_path)
+                          "Sending audio to Speech-to-Text for transcription...")
+            raw_transcription_segments = transcribe_with_speech_to_text(audio_path, video_duration)
             transcription_segments = split_transcription_segments(raw_transcription_segments)
             elapsed = time.time() - t3
             store_transcriptions(supabase, project_id, transcription_segments)
