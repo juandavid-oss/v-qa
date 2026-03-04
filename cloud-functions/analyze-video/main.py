@@ -3,6 +3,7 @@ import re
 import stat
 import tarfile
 import time
+import concurrent.futures
 import traceback
 import uuid
 import json
@@ -58,6 +59,8 @@ SPELLCHECK_API_KEY = os.environ.get("SPELLCHECK_API_KEY")
 CLOUD_FUNCTION_SECRET = os.environ.get("CLOUD_FUNCTION_SECRET")
 MIN_SUBTITLE_CONFIDENCE = float(os.environ.get("MIN_SUBTITLE_CONFIDENCE", "0.9"))
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
+VI_OPERATION_TIMEOUT_SECONDS = int(os.environ.get("VI_OPERATION_TIMEOUT_SECONDS", "480"))
+VI_POLL_INTERVAL_SECONDS = int(os.environ.get("VI_POLL_INTERVAL_SECONDS", "15"))
 FRAME_IO_TOKEN = os.environ.get("FRAME_IO_TOKEN") or os.environ.get("FRAME_IO_V4_TOKEN")
 FRAME_IO_V4_API = "https://api.frame.io/v4"
 FRAME_MEDIA_LINK_INCLUDES = ",".join((
@@ -507,15 +510,62 @@ def detect_text_in_video(video_path: str) -> list[dict]:
 def detect_text_in_video_with_raw(video_path: str) -> tuple[list[dict], dict]:
     """Detect text and return both flattened detections and raw VI payload."""
     client = vi.VideoIntelligenceServiceClient()
+    video_size_bytes = os.path.getsize(video_path)
+    video_size_mb = video_size_bytes / (1024 * 1024)
 
     with open(video_path, "rb") as f:
         input_content = f.read()
 
     features = [vi.Feature.TEXT_DETECTION]
+    print(
+        "Video Intelligence start: "
+        f"payload_size={video_size_mb:.1f}MB timeout={VI_OPERATION_TIMEOUT_SECONDS}s poll={VI_POLL_INTERVAL_SECONDS}s",
+        flush=True,
+    )
     operation = client.annotate_video(
         request={"input_content": input_content, "features": features}
     )
-    result = operation.result(timeout=600)
+    operation_name = getattr(getattr(operation, "operation", None), "name", "") or "unknown"
+    print(f"Video Intelligence operation created: name={operation_name}", flush=True)
+
+    started_at = time.time()
+    while True:
+        try:
+            result = operation.result(timeout=VI_POLL_INTERVAL_SECONDS)
+            elapsed = time.time() - started_at
+            print(
+                "Video Intelligence operation completed: "
+                f"name={operation_name} elapsed={elapsed:.1f}s",
+                flush=True,
+            )
+            break
+        except concurrent.futures.TimeoutError:
+            elapsed = time.time() - started_at
+            progress_hint = ""
+            try:
+                metadata = operation.metadata
+                if metadata and getattr(metadata, "annotation_progress", None):
+                    percents = [
+                        progress.progress_percent
+                        for progress in metadata.annotation_progress
+                        if hasattr(progress, "progress_percent")
+                    ]
+                    if percents:
+                        progress_hint = f" vi_progress={max(percents)}%"
+            except Exception:
+                progress_hint = ""
+
+            print(
+                "Video Intelligence still running: "
+                f"name={operation_name} elapsed={elapsed:.1f}s{progress_hint}",
+                flush=True,
+            )
+            if elapsed >= VI_OPERATION_TIMEOUT_SECONDS:
+                raise TimeoutError(
+                    "Video Intelligence did not complete within "
+                    f"{VI_OPERATION_TIMEOUT_SECONDS}s "
+                    f"(operation={operation_name}, payload={video_size_mb:.1f}MB)"
+                )
     detections = extract_detections_from_vi_result(result)
 
     raw_payload = MessageToDict(
