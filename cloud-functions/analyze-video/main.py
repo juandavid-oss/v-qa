@@ -8,7 +8,6 @@ import concurrent.futures
 import traceback
 import uuid
 import json
-import difflib
 import subprocess
 import tempfile
 from functools import cmp_to_key
@@ -1094,7 +1093,11 @@ def _extract_words_from_v2_results(results) -> list[dict]:
     return words
 
 
-def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0, debug_logger=None) -> tuple[list[dict], dict]:
+def transcribe_with_speech_to_text(
+    audio_path: str,
+    duration_seconds: float = 0,
+    debug_logger=None,
+) -> tuple[list[dict], dict, list[dict]]:
     """Transcribe audio using Google Cloud Speech-to-Text V2 (chirp_3).
 
     Uses synchronous `recognize` for audio ≤60s and
@@ -1206,7 +1209,7 @@ def transcribe_with_speech_to_text(audio_path: str, duration_seconds: float = 0,
     # Group words into 1-second buckets for transcription panel sections.
     segments = _group_words_by_second(words)
     _log(f"STT response IN grouped_by_second_segments={len(segments)}", level="DEBUG")
-    return segments, raw_payload
+    return segments, raw_payload, words
 
 
 def split_transcription_segments(segments: list[dict]) -> list[dict]:
@@ -1414,10 +1417,10 @@ _NUMBER_WORDS = {
 }
 
 
-SYNCED_RATIO_THRESHOLD = 0.8
-LIKELY_SYNCED_RATIO_THRESHOLD = 0.5
+SYNCED_TIME_THRESHOLD_SECONDS = 1.5
+LIKELY_SYNCED_TIME_THRESHOLD_SECONDS = 2.0
+OFFSET_SCAN_WINDOW_SECONDS = 2.0
 OFFSET_SCAN_STEP_SECONDS = 0.1
-OFFSET_MIN_RATIO_IMPROVEMENT = 0.2
 
 
 def _normalize_text_for_sync(text: str) -> str:
@@ -1459,14 +1462,48 @@ def _build_segment_word_windows(segment: dict) -> list[dict]:
     return windows
 
 
-def _collect_aligned_tokens_for_window(start: float, end: float, segments: list[dict]) -> list[str]:
+def _build_transcription_token_windows(
+    transcriptions: list[dict],
+    transcription_words: list[dict] | None = None,
+) -> list[dict]:
+    windows: list[dict] = []
+
+    if transcription_words:
+        for word in transcription_words:
+            raw_word = word.get("word")
+            tokens = _tokenize_text_for_sync(raw_word if isinstance(raw_word, str) else "")
+            if not tokens:
+                continue
+
+            start = _to_float(word.get("start_time"), 0.0)
+            end = _to_float(word.get("end_time"), start)
+            if end <= start:
+                end = start + 0.001
+
+            token_duration = (end - start) / max(len(tokens), 1)
+            for i, token in enumerate(tokens):
+                token_start = start + (i * token_duration)
+                token_end = start + ((i + 1) * token_duration)
+                windows.append({
+                    "token": token,
+                    "start_time": token_start,
+                    "end_time": token_end,
+                })
+    else:
+        for segment in transcriptions:
+            windows.extend(_build_segment_word_windows(segment))
+
+    windows.sort(key=lambda w: (w["start_time"], w["end_time"], w["token"]))
+    return windows
+
+
+def _collect_aligned_tokens_for_window(start: float, end: float, token_windows: list[dict]) -> list[str]:
     if end <= start:
         return []
     tokens: list[str] = []
-    for segment in segments:
-        for window in _build_segment_word_windows(segment):
-            if window["end_time"] > start and window["start_time"] < end:
-                tokens.append(window["token"])
+    for window in token_windows:
+        if window["end_time"] > start and window["start_time"] < end:
+            tokens.append(window["token"])
     return tokens
 
 
@@ -1522,17 +1559,19 @@ def _detect_subtitle_overlaps(subtitles: list[dict]) -> list[dict]:
     return overlaps
 
 
-def _find_best_temporal_offset(subtitle: dict, transcriptions: list[dict], window: float, step: float) -> dict:
+def _find_best_temporal_offset(subtitle: dict, token_windows: list[dict], window: float, step: float) -> dict:
     safe_step = step if step > 0 else OFFSET_SCAN_STEP_SECONDS
     subtitle_text = subtitle.get("text", "")
     subtitle_tokens = _tokenize_text_for_sync(subtitle_text)
+    subtitle_token_set = set(subtitle_tokens)
     subtitle_start = _to_float(subtitle.get("start_time"), 0.0)
     subtitle_end = _to_float(subtitle.get("end_time"), subtitle_start)
 
-    baseline_tokens = _collect_aligned_tokens_for_window(subtitle_start, subtitle_end, transcriptions)
-    baseline_ratio = _compute_word_overlap_ratio(subtitle_tokens, baseline_tokens)
-
-    best_ratio = baseline_ratio
+    baseline_tokens = _collect_aligned_tokens_for_window(subtitle_start, subtitle_end, token_windows)
+    baseline_set = set(baseline_tokens)
+    best_ratio = _compute_word_overlap_ratio(subtitle_tokens, baseline_tokens)
+    best_common_count = len(subtitle_token_set.intersection(baseline_set))
+    best_exact_match = bool(subtitle_token_set) and baseline_set == subtitle_token_set
     best_offset = 0.0
     best_tokens = baseline_tokens
 
@@ -1544,32 +1583,56 @@ def _find_best_temporal_offset(subtitle: dict, transcriptions: list[dict], windo
         shifted_tokens = _collect_aligned_tokens_for_window(
             subtitle_start + offset,
             subtitle_end + offset,
-            transcriptions,
+            token_windows,
         )
+        shifted_set = set(shifted_tokens)
         ratio = _compute_word_overlap_ratio(subtitle_tokens, shifted_tokens)
-        if ratio > best_ratio:
+        common_count = len(subtitle_token_set.intersection(shifted_set))
+        exact_match = bool(subtitle_token_set) and shifted_set == subtitle_token_set
+        better_candidate = (
+            (exact_match and not best_exact_match)
+            or (
+                exact_match == best_exact_match
+                and (
+                    ratio > best_ratio
+                    or (
+                        abs(ratio - best_ratio) <= 1e-9
+                        and common_count > best_common_count
+                    )
+                    or (
+                        abs(ratio - best_ratio) <= 1e-9
+                        and common_count == best_common_count
+                        and abs(offset) < abs(best_offset)
+                    )
+                )
+            )
+        )
+        if better_candidate:
             best_ratio = ratio
+            best_common_count = common_count
+            best_exact_match = exact_match
             best_offset = offset
             best_tokens = shifted_tokens
 
-    ratio_improvement = best_ratio - baseline_ratio
-    material_improvement = ratio_improvement >= OFFSET_MIN_RATIO_IMPROVEMENT and best_ratio >= SYNCED_RATIO_THRESHOLD
     return {
-        "baseline_ratio": baseline_ratio,
         "best_ratio": best_ratio,
+        "best_common_count": best_common_count,
+        "subtitle_token_count": len(subtitle_token_set),
+        "exact_word_match": best_exact_match,
         "best_offset_seconds": round(best_offset, 3),
+        "best_tokens": best_tokens,
         "best_text": " ".join(best_tokens),
-        "material_improvement": material_improvement,
-        "ratio_improvement": ratio_improvement,
     }
 
 
 def build_sync_report(
     subtitles: list[dict],
     transcriptions: list[dict],
-    offset_window_seconds: float = 1.5,
+    transcription_words: list[dict] | None = None,
+    offset_window_seconds: float = OFFSET_SCAN_WINDOW_SECONDS,
 ) -> dict:
     duplicates = _detect_subtitle_overlaps(subtitles)
+    token_windows = _build_transcription_token_windows(transcriptions, transcription_words)
     duplicate_map: dict[int, list[int]] = {}
     for duplicate in duplicates:
         first, second = duplicate["subtitle_indices"]
@@ -1587,49 +1650,48 @@ def build_sync_report(
         start = _to_float(subtitle.get("start_time"), 0.0)
         end = _to_float(subtitle.get("end_time"), start)
         subtitle_tokens = _tokenize_text_for_sync(subtitle_text)
-        aligned_tokens = _collect_aligned_tokens_for_window(start, end, transcriptions)
+        subtitle_token_set = set(subtitle_tokens)
+        offset_info = _find_best_temporal_offset(
+            subtitle,
+            token_windows,
+            window=offset_window_seconds,
+            step=OFFSET_SCAN_STEP_SECONDS,
+        )
+        aligned_tokens = offset_info["best_tokens"]
+        aligned_token_set = set(aligned_tokens)
         matched_transcription_text = " ".join(aligned_tokens)
-        ratio = _compute_word_overlap_ratio(subtitle_tokens, aligned_tokens)
+        ratio = offset_info["best_ratio"]
         ratio_sum += ratio
+        delta_seconds = abs(float(offset_info["best_offset_seconds"]))
         issues: list[str] = []
 
         if not subtitle_text.strip():
             issues.append("EMPTY_SUBTITLE_TEXT")
         if not aligned_tokens:
             issues.append("NO_OVERLAPPING_TRANSCRIPTION")
+        issues.append(f"BEST_SHIFT_SECONDS:{offset_info['best_offset_seconds']:.3f}")
+        issues.append(f"TIME_DELTA_SECONDS:{delta_seconds:.3f}")
 
-        if ratio >= SYNCED_RATIO_THRESHOLD:
+        words_match_normalized = bool(subtitle_token_set) and subtitle_token_set == aligned_token_set
+        if not words_match_normalized:
+            status = "MISALIGNED"
+            misaligned += 1
+            issues.append("WORDS_DIFFER_NORMALIZED")
+        elif delta_seconds <= SYNCED_TIME_THRESHOLD_SECONDS:
             status = "SYNCED"
             synced += 1
-        elif ratio >= LIKELY_SYNCED_RATIO_THRESHOLD:
+        elif delta_seconds <= LIKELY_SYNCED_TIME_THRESHOLD_SECONDS:
             status = "LIKELY_SYNCED"
             likely_synced += 1
+            issues.append("SLIGHT_TIME_DRIFT")
         else:
             status = "MISALIGNED"
             misaligned += 1
+            issues.append("TIME_DELTA_EXCEEDED")
 
         duplicate_peers = duplicate_map.get(index, [])
         for peer in duplicate_peers:
             issues.append(f"DUPLICATE_OVERLAP: overlaps subtitle #{peer}")
-
-        if status == "LIKELY_SYNCED" and subtitle_tokens and aligned_tokens:
-            diff_ops = difflib.SequenceMatcher(a=subtitle_tokens, b=aligned_tokens).get_opcodes()
-            has_diff = any(tag != "equal" for tag, _, _, _, _ in diff_ops)
-            if has_diff:
-                issues.append(
-                    f"OCR_ERROR_CANDIDATE: expected '{matched_transcription_text}' got '{_normalize_text_for_sync(subtitle_text)}'"
-                )
-
-        offset_info = _find_best_temporal_offset(
-            subtitle,
-            transcriptions,
-            window=offset_window_seconds,
-            step=OFFSET_SCAN_STEP_SECONDS,
-        )
-        if offset_info["material_improvement"] and abs(offset_info["best_offset_seconds"]) > 0:
-            issues.append(
-                f"TEMPORAL_OFFSET: best_shift_seconds={offset_info['best_offset_seconds']} best_ratio={offset_info['best_ratio']:.3f}"
-            )
 
         detail = {
             "subtitle_index": index,
@@ -1720,12 +1782,17 @@ def _compare_subtitles_for_join(a: dict, b: dict) -> int:
     return 0
 
 
-def detect_mismatches(subtitles: list[dict], transcriptions: list[dict]) -> list[dict]:
+def detect_mismatches(
+    subtitles: list[dict],
+    transcriptions: list[dict],
+    transcription_words: list[dict] | None = None,
+) -> list[dict]:
     """Persistable mismatch rows: only MISALIGNED subtitle checks."""
     report = build_sync_report(
         subtitles=subtitles,
         transcriptions=transcriptions,
-        offset_window_seconds=1.5,
+        transcription_words=transcription_words,
+        offset_window_seconds=OFFSET_SCAN_WINDOW_SECONDS,
     )
     mismatches = []
 
@@ -1737,10 +1804,12 @@ def detect_mismatches(subtitles: list[dict], transcriptions: list[dict]) -> list
         mismatch_type = "subtitle_misaligned_to_transcription"
         if any(str(issue).startswith("NO_OVERLAPPING_TRANSCRIPTION") for issue in issues):
             mismatch_type = "no_overlapping_transcription"
+        elif any(str(issue).startswith("WORDS_DIFFER_NORMALIZED") for issue in issues):
+            mismatch_type = "normalized_word_mismatch"
         elif any(str(issue).startswith("EMPTY_SUBTITLE_TEXT") for issue in issues):
             mismatch_type = "empty_subtitle_text"
-        elif any(str(issue).startswith("TEMPORAL_OFFSET") for issue in issues):
-            mismatch_type = "temporal_offset_detected"
+        elif any(str(issue).startswith("TIME_DELTA_EXCEEDED") for issue in issues):
+            mismatch_type = "time_delta_exceeded"
 
         time_range = detail.get("subtitle_time_seconds") or [0.0, 0.0]
         start_time = _to_float(time_range[0], 0.0) if len(time_range) > 0 else 0.0
@@ -2217,7 +2286,7 @@ def analyze_video(request):
             sync_report = build_sync_report(
                 subtitles=filtered_subtitles,
                 transcriptions=transcriptions_for_sync,
-                offset_window_seconds=1.5,
+                offset_window_seconds=OFFSET_SCAN_WINDOW_SECONDS,
             )
 
             spelling_input = [
@@ -2341,7 +2410,7 @@ def analyze_video(request):
 
             update_status(supabase, project_id, "transcribing_audio", 55,
                           "Sending audio to Speech-to-Text for transcription...", debug_lines=debug_lines)
-            raw_transcription_segments, raw_transcription_payload = transcribe_with_speech_to_text(
+            raw_transcription_segments, raw_transcription_payload, transcription_words = transcribe_with_speech_to_text(
                 audio_path,
                 video_duration,
                 debug_logger=make_step_logger("transcribing_audio", 55),
@@ -2397,7 +2466,11 @@ def analyze_video(request):
             update_status(supabase, project_id, "detecting_mismatches", 85,
                           "Comparing subtitles against transcription...", debug_lines=debug_lines)
             filtered_subs = build_filtered_subtitles(classified)
-            mismatches = detect_mismatches(filtered_subs, transcription_segments)
+            mismatches = detect_mismatches(
+                filtered_subs,
+                transcription_segments,
+                transcription_words=transcription_words,
+            )
             store_mismatches(supabase, project_id, mismatches)
             elapsed = time.time() - t5
             update_status(supabase, project_id, "detecting_mismatches", 95,

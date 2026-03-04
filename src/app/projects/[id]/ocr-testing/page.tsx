@@ -385,6 +385,18 @@ function spellingStatusLabel(status: OcrAuditRow["spelling_status"]) {
   }
 }
 
+function syncStatusLabel(status: SyncReportDetail["status"]) {
+  switch (status) {
+    case "SYNCED":
+      return "Synced";
+    case "LIKELY_SYNCED":
+      return "Slightly Synced";
+    case "MISALIGNED":
+    default:
+      return "Unsynced";
+  }
+}
+
 export default function OcrTestingPage() {
   const params = useParams();
   const projectId = params.id as string;
@@ -587,8 +599,8 @@ export default function OcrTestingPage() {
                 <div className="grid grid-cols-2 md:grid-cols-7 gap-3 text-sm mb-4">
                   <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Total: <b>{result.sync_report.summary.total_subtitles}</b></div>
                   <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Synced: <b>{result.sync_report.summary.synced}</b></div>
-                  <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Likely: <b>{result.sync_report.summary.likely_synced}</b></div>
-                  <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Misaligned: <b>{result.sync_report.summary.misaligned}</b></div>
+                  <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Slightly synced: <b>{result.sync_report.summary.likely_synced}</b></div>
+                  <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Unsynced: <b>{result.sync_report.summary.misaligned}</b></div>
                   <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Duplicates: <b>{result.sync_report.summary.duplicates_found}</b></div>
                   <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Avg overlap: <b>{result.sync_report.summary.avg_word_overlap_ratio.toFixed(3)}</b></div>
                   <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2">Overall: <b>{result.sync_report.summary.overall_sync_status}</b></div>
@@ -615,7 +627,7 @@ export default function OcrTestingPage() {
                           <td className="py-2 pr-4 font-mono text-xs">
                             {formatTimecode(detail.subtitle_time_seconds[0])} - {formatTimecode(detail.subtitle_time_seconds[1])}
                           </td>
-                          <td className="py-2 pr-4">{detail.status}</td>
+                          <td className="py-2 pr-4">{syncStatusLabel(detail.status)}</td>
                           <td className="py-2 pr-4">{detail.word_overlap_ratio.toFixed(3)}</td>
                           <td className="py-2 pr-4">{detail.edit_distance}</td>
                           <td className="py-2 pr-4">{detail.subtitle_text}</td>
