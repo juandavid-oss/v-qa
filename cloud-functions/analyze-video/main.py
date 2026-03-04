@@ -1093,6 +1093,87 @@ def _extract_words_from_v2_results(results) -> list[dict]:
     return words
 
 
+def _extract_words_from_stt_raw_response(raw_response: dict) -> list[dict]:
+    """Extract normalized word timing rows from STT raw JSON payload."""
+    if not isinstance(raw_response, dict):
+        return []
+
+    extracted: list[dict] = []
+
+    def _visit(node):
+        if isinstance(node, dict):
+            words_node = node.get("words")
+            if isinstance(words_node, list):
+                for word_info in words_node:
+                    if not isinstance(word_info, dict):
+                        continue
+                    token = read_string(word_info.get("word")) or ""
+                    if not token:
+                        continue
+
+                    start = _parse_transcription_time_seconds(
+                        word_info.get("start_offset", word_info.get("startOffset")),
+                        0.0,
+                    )
+                    end = _parse_transcription_time_seconds(
+                        word_info.get("end_offset", word_info.get("endOffset")),
+                        start,
+                    )
+                    if start is None:
+                        start = 0.0
+                    if end is None or end < start:
+                        end = start
+
+                    speaker_raw = (
+                        word_info.get("speaker_label")
+                        or word_info.get("speakerLabel")
+                        or word_info.get("speaker_tag")
+                        or word_info.get("speakerTag")
+                    )
+                    speaker_value = None
+                    if isinstance(speaker_raw, (int, float)):
+                        speaker_num = int(speaker_raw)
+                        if speaker_num > 0:
+                            speaker_value = f"Speaker {speaker_num}"
+                    elif isinstance(speaker_raw, str):
+                        cleaned = speaker_raw.strip()
+                        if cleaned:
+                            speaker_value = cleaned
+
+                    confidence = word_info.get("confidence")
+                    if not isinstance(confidence, (int, float)):
+                        confidence = None
+
+                    extracted.append({
+                        "word": token,
+                        "start_time": float(start),
+                        "end_time": float(end),
+                        "speaker": speaker_value,
+                        "confidence": confidence,
+                    })
+
+            for value in node.values():
+                _visit(value)
+        elif isinstance(node, list):
+            for item in node:
+                _visit(item)
+
+    _visit(raw_response)
+
+    deduped: dict[tuple, dict] = {}
+    for word in extracted:
+        key = (
+            word.get("word"),
+            round(_to_float(word.get("start_time"), 0.0), 6),
+            round(_to_float(word.get("end_time"), 0.0), 6),
+        )
+        deduped[key] = word
+
+    words = list(deduped.values())
+    words.sort(key=lambda w: (_to_float(w.get("start_time"), 0.0), _to_float(w.get("end_time"), 0.0)))
+    return words
+
+
 def transcribe_with_speech_to_text(
     audio_path: str,
     duration_seconds: float = 0,
@@ -2015,6 +2096,54 @@ def update_project_transcription_raw_metadata(supabase, project_id: str, raw_met
     }).eq("id", project_id).execute()
 
 
+def load_transcription_raw_words(project_id: str, storage_path: str) -> list[dict]:
+    """Load raw STT payload from Storage and extract word-level timings."""
+    if not project_id or not storage_path:
+        return []
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return []
+
+    download_url = f"{SUPABASE_URL}/storage/v1/object/transcription-raw/{storage_path}"
+    try:
+        response = requests.get(
+            download_url,
+            headers={
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "apikey": SUPABASE_SERVICE_KEY,
+            },
+            timeout=30,
+        )
+    except Exception as error:
+        print(
+            f"WARNING: failed to download transcription raw for sync report (project_id={project_id}): {error}",
+            flush=True,
+        )
+        return []
+
+    if response.status_code >= 400:
+        print(
+            (
+                "WARNING: failed to download transcription raw for sync report "
+                f"(project_id={project_id}, status={response.status_code}, body={response.text[:200]})"
+            ),
+            flush=True,
+        )
+        return []
+
+    try:
+        payload = response.json()
+    except Exception as error:
+        print(
+            f"WARNING: transcription raw JSON parse failed (project_id={project_id}): {error}",
+            flush=True,
+        )
+        return []
+
+    raw_response = payload.get("raw_response") if isinstance(payload, dict) else None
+    words = _extract_words_from_stt_raw_response(raw_response if isinstance(raw_response, dict) else {})
+    return words
+
+
 def build_filtered_subtitles(detections: list[dict]) -> list[dict]:
     fixed_text_set = {
         d["text"].strip().lower()
@@ -2266,6 +2395,7 @@ def analyze_video(request):
             filtered_subtitles = build_filtered_subtitles(classified)
             filtered_subtitle_ids = {d.get("detection_id") for d in filtered_subtitles if d.get("detection_id")}
             transcriptions_for_sync: list[dict] = []
+            transcription_words_for_sync: list[dict] = []
             if project_id:
                 try:
                     transcriptions_resp = (
@@ -2283,9 +2413,34 @@ def analyze_video(request):
                         f"WARNING: could not load transcriptions for sync report (project_id={project_id}): {transcriptions_error}",
                         flush=True,
                     )
+                try:
+                    project_meta_resp = (
+                        supabase.table("projects")
+                        .select("transcription_raw_storage_path")
+                        .eq("id", project_id)
+                        .limit(1)
+                        .execute()
+                    )
+                    project_rows = project_meta_resp.data if hasattr(project_meta_resp, "data") else []
+                    storage_path = None
+                    if isinstance(project_rows, list) and project_rows:
+                        first_row = project_rows[0]
+                        if isinstance(first_row, dict):
+                            storage_path = read_string(first_row.get("transcription_raw_storage_path"))
+                    if storage_path:
+                        transcription_words_for_sync = load_transcription_raw_words(project_id, storage_path)
+                except Exception as transcription_raw_error:
+                    print(
+                        (
+                            "WARNING: could not load transcription raw words for sync report "
+                            f"(project_id={project_id}): {transcription_raw_error}"
+                        ),
+                        flush=True,
+                    )
             sync_report = build_sync_report(
                 subtitles=filtered_subtitles,
                 transcriptions=transcriptions_for_sync,
+                transcription_words=transcription_words_for_sync if transcription_words_for_sync else None,
                 offset_window_seconds=OFFSET_SCAN_WINDOW_SECONDS,
             )
 
