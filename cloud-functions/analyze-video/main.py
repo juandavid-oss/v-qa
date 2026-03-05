@@ -51,6 +51,39 @@ def _ensure_ffmpeg():
         os.chmod(binary, st.st_mode | stat.S_IEXEC)
     print("ffmpeg ready.", flush=True)
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
+    raw = os.environ.get(name)
+    try:
+        value = int(raw) if raw is not None else default
+    except (TypeError, ValueError):
+        value = default
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
+
+
+def _env_float(name: str, default: float, min_value: float | None = None, max_value: float | None = None) -> float:
+    raw = os.environ.get(name)
+    try:
+        value = float(raw) if raw is not None else default
+    except (TypeError, ValueError):
+        value = default
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
+
 # --- Configuration ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -64,6 +97,11 @@ MIN_SUBTITLE_CONFIDENCE = float(os.environ.get("MIN_SUBTITLE_CONFIDENCE", "0.9")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
 VI_OPERATION_TIMEOUT_SECONDS = int(os.environ.get("VI_OPERATION_TIMEOUT_SECONDS", "480"))
 VI_POLL_INTERVAL_SECONDS = int(os.environ.get("VI_POLL_INTERVAL_SECONDS", "15"))
+OCR_PROXY_ENABLED = _env_bool("OCR_PROXY_ENABLED", True)
+OCR_PROXY_FPS = _env_float("OCR_PROXY_FPS", 6.0, min_value=1.0, max_value=30.0)
+OCR_PROXY_MAX_WIDTH = _env_int("OCR_PROXY_MAX_WIDTH", 1280, min_value=320, max_value=3840)
+OCR_PROXY_CRF = _env_int("OCR_PROXY_CRF", 29, min_value=0, max_value=51)
+OCR_PROXY_PRESET = os.environ.get("OCR_PROXY_PRESET", "veryfast").strip() or "veryfast"
 DEBUG_LOG_MAX_LINES = int(os.environ.get("DEBUG_LOG_MAX_LINES", "50"))
 FRAME_IO_TOKEN = os.environ.get("FRAME_IO_TOKEN") or os.environ.get("FRAME_IO_V4_TOKEN")
 FRAME_IO_V4_API = "https://api.frame.io/v4"
@@ -548,7 +586,11 @@ def detect_text_in_video(video_path: str) -> list[dict]:
     return extract_detections_from_vi_result(result)
 
 
-def detect_text_in_video_with_raw(video_path: str, debug_logger=None) -> tuple[list[dict], dict]:
+def detect_text_in_video_with_raw(
+    video_path: str,
+    debug_logger=None,
+    input_source: str = "original",
+) -> tuple[list[dict], dict]:
     """Detect text and return both flattened detections and raw VI payload."""
     client = vi.VideoIntelligenceServiceClient()
     video_size_bytes = os.path.getsize(video_path)
@@ -567,6 +609,7 @@ def detect_text_in_video_with_raw(video_path: str, debug_logger=None) -> tuple[l
     _log(
         "VI request OUT annotate_video "
         f"payload_size={video_size_mb:.1f}MB "
+        f"source={input_source} "
         f"timeout={VI_OPERATION_TIMEOUT_SECONDS}s poll={VI_POLL_INTERVAL_SECONDS}s",
         level="DEBUG",
     )
@@ -583,7 +626,7 @@ def detect_text_in_video_with_raw(video_path: str, debug_logger=None) -> tuple[l
             elapsed = time.time() - started_at
             _log(
                 "VI response IN_DONE "
-                f"name={operation_name} elapsed={elapsed:.1f}s",
+                f"name={operation_name} elapsed={elapsed:.1f}s source={input_source}",
                 level="DEBUG",
             )
             break
@@ -614,6 +657,7 @@ def detect_text_in_video_with_raw(video_path: str, debug_logger=None) -> tuple[l
                 _log(
                     "VI timeout ERROR "
                     f"name={operation_name} elapsed={elapsed:.1f}s payload={video_size_mb:.1f}MB "
+                    f"source={input_source} "
                     f"configured_timeout={VI_OPERATION_TIMEOUT_SECONDS}s "
                     f"last_progress={progress_value if progress_value is not None else 'unknown'}",
                     level="ERROR",
@@ -631,6 +675,95 @@ def detect_text_in_video_with_raw(video_path: str, debug_logger=None) -> tuple[l
     ) if hasattr(result, "_pb") else {}
 
     return detections, raw_payload
+
+
+def build_ocr_proxy_video(video_path: str, tmp_dir: str, debug_logger=None) -> str | None:
+    """Build a smaller proxy video for OCR-only processing.
+
+    Returns proxy path if successful and smaller than original, otherwise None.
+    """
+    def _log(message: str, level: str = "DEBUG"):
+        if debug_logger:
+            debug_logger(message, level=level)
+            return
+        print(message, flush=True)
+
+    proxy_path = os.path.join(tmp_dir, "ocr_proxy.mp4")
+    original_size_bytes = os.path.getsize(video_path)
+    original_size_mb = original_size_bytes / (1024 * 1024)
+    _log(
+        "OCR proxy OUT start "
+        f"fps={OCR_PROXY_FPS:g} max_width={OCR_PROXY_MAX_WIDTH} crf={OCR_PROXY_CRF} preset={OCR_PROXY_PRESET} "
+        f"original_size={original_size_mb:.1f}MB",
+        level="DEBUG",
+    )
+
+    try:
+        _ensure_ffmpeg()
+    except Exception as error:
+        _log(f"OCR proxy ERROR ffmpeg_not_available: {error}", level="ERROR")
+        return None
+
+    started_at = time.time()
+    vf_filter = f"fps={OCR_PROXY_FPS:g},scale=min({OCR_PROXY_MAX_WIDTH}\\,iw):-2"
+    command = [
+        _FFMPEG_PATH,
+        "-y",
+        "-i",
+        video_path,
+        "-an",
+        "-vf",
+        vf_filter,
+        "-c:v",
+        "libx264",
+        "-preset",
+        OCR_PROXY_PRESET,
+        "-crf",
+        str(OCR_PROXY_CRF),
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        proxy_path,
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        _log(
+            "OCR proxy ERROR transcode_failed "
+            f"returncode={result.returncode} stderr_tail={stderr[-300:]}",
+            level="ERROR",
+        )
+        return None
+
+    if not os.path.isfile(proxy_path):
+        _log("OCR proxy ERROR output_missing", level="ERROR")
+        return None
+
+    proxy_size_bytes = os.path.getsize(proxy_path)
+    if proxy_size_bytes <= 1024:
+        _log("OCR proxy ERROR output_too_small", level="ERROR")
+        return None
+
+    elapsed = time.time() - started_at
+    proxy_size_mb = proxy_size_bytes / (1024 * 1024)
+    ratio = proxy_size_bytes / max(original_size_bytes, 1)
+    if proxy_size_bytes >= original_size_bytes:
+        _log(
+            "OCR proxy IN skipped_not_smaller "
+            f"proxy_size={proxy_size_mb:.1f}MB original_size={original_size_mb:.1f}MB "
+            f"ratio={ratio:.3f} elapsed={elapsed:.1f}s",
+            level="DEBUG",
+        )
+        return None
+
+    _log(
+        "OCR proxy IN done "
+        f"proxy_size={proxy_size_mb:.1f}MB original_size={original_size_mb:.1f}MB "
+        f"ratio={ratio:.3f} elapsed={elapsed:.1f}s",
+        level="DEBUG",
+    )
+    return proxy_path
 
 
 def extract_detections_from_vi_result(result) -> list[dict]:
@@ -2835,14 +2968,35 @@ def analyze_video(request):
             t2 = time.time()
             update_status(supabase, project_id, "detecting_text", 20,
                           "Sending video to Google Video Intelligence API...", debug_lines=debug_lines)
+            detect_logger = make_step_logger("detecting_text", 20)
+            ocr_input_path = video_path
+            ocr_source = "original"
+            if OCR_PROXY_ENABLED:
+                proxy_path = build_ocr_proxy_video(
+                    video_path,
+                    tmp_dir,
+                    debug_logger=detect_logger,
+                )
+                if proxy_path:
+                    ocr_input_path = proxy_path
+                    ocr_source = "proxy"
+            else:
+                detect_logger("OCR proxy disabled by config", level="DEBUG")
+            detect_logger(f"OCR source selected: {ocr_source}", level="DEBUG")
             raw_detections, raw_payload = detect_text_in_video_with_raw(
-                video_path,
-                debug_logger=make_step_logger("detecting_text", 20),
+                ocr_input_path,
+                debug_logger=detect_logger,
+                input_source=ocr_source,
             )
             elapsed = time.time() - t2
             stage_durations["detecting_text"] = elapsed
             update_status(supabase, project_id, "detecting_text", 30,
-                          f"Video Intelligence done: {len(raw_detections)} raw text detections in {elapsed:.1f}s", debug_lines=debug_lines)
+                          (
+                              "Video Intelligence done: "
+                              f"{len(raw_detections)} raw text detections in {elapsed:.1f}s "
+                              f"(source={ocr_source})"
+                          ),
+                          debug_lines=debug_lines)
 
             raw_meta = save_ocr_raw_to_storage(project_id, video_url, raw_payload)
             update_project_ocr_raw_metadata(supabase, project_id, raw_meta)
